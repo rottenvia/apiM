@@ -658,16 +658,35 @@ impl Drop for TreeGuard {
     }
 }
 
-/// Runs to completion or to the limit (None waits as long as it takes). Returns (exit code, combined output, timed out).
+/// How a run came to an end.
+enum Ended {
+    /// (exit code, combined output, timed out).
+    Ran(Option<i32>, String, bool),
+    /// The user said something while it ran: the program, still going, and what it has printed (its pipes go on filling it).
+    Spoken(Child, Arc<Mutex<String>>),
+}
+
+/// Runs to completion or to the limit (None waits as long as it takes).
 /// With `keep`, every byte of the output also goes to that file, and how many there were comes back in it.
-async fn run_to_end(mut child: Child, limit: Option<Duration>, keep: Option<Arc<Mutex<Kept>>>) -> (Option<i32>, String, bool) {
+/// With `listen`, the user's words while it runs end the wait and leave the program running.
+async fn run_to_end(mut child: Child, limit: Option<Duration>, keep: Option<Arc<Mutex<Kept>>>, listen: Option<&Ctx>) -> Ended {
     let log = Arc::new(Mutex::new(String::new()));
     let readers = [child.stdout.take().map(|p| pump(p, log.clone(), keep.clone())), child.stderr.take().map(|p| pump(p, log.clone(), keep.clone()))];
     let pid = child.id();
     let mut guard = TreeGuard(pid);
-    let waited = match limit {
-        Some(limit) => tokio::time::timeout(limit, child.wait()).await.ok(),
-        None => Some(child.wait().await),
+    let deadline = limit.map(|limit| Instant::now() + limit);
+    let waited = loop {
+        tokio::select! {
+            status = child.wait() => break Some(status),
+            _ = tokio::time::sleep(Duration::from_millis(150)) => {}
+        }
+        if deadline.is_some_and(|at| Instant::now() >= at) {
+            break None;
+        }
+        if listen.is_some_and(Ctx::spoken_to) {
+            guard.0 = None;
+            return Ended::Spoken(child, log);
+        }
     };
     // Finished or timed out: the explicit kill below handles the second, so the guard has nothing left to do.
     guard.0 = None;
@@ -686,7 +705,7 @@ async fn run_to_end(mut child: Child, limit: Option<Duration>, keep: Option<Arc<
     // a pipe, one after the other, that put 4 s on every command that started one.
     let _ = tokio::time::timeout(AFTER_EXIT, futures_util::future::join_all(readers.into_iter().flatten())).await;
     let out = log.lock().unwrap().clone();
-    (code, out, timed_out)
+    Ended::Ran(code, out, timed_out)
 }
 
 /// What one finished run left behind.
@@ -707,7 +726,7 @@ pub struct Ran {
 }
 
 /// Approves and runs one program to the end, shared by run_command, run_tests and build_project. `limit` None waits as long as it takes.
-/// Err is the refusal, ready to return to the model.
+/// Err is the answer as it goes back to the model: a refusal, or (run_command) the program left running because the user spoke.
 /// `stdin` is text for the program's standard input: `python -` runs it as a script, in one call and with no file
 /// left behind. A reply wrote some fifty one-off scripts as files and ran each in a second round.
 pub async fn execute(ctx: &Ctx, program: &str, argv: Vec<String>, reason: &str, limit: Option<Duration>, stdin: Option<&str>) -> Result<Ran, Output> {
@@ -716,6 +735,9 @@ pub async fn execute(ctx: &Ctx, program: &str, argv: Vec<String>, reason: &str, 
 
 /// `execute`, and with `keep` the whole output is left in `.outputs/` when the answer may not hold it for long:
 /// when it is longer than the answer shows, or long enough to be folded out of the reply's context later.
+/// With `keep` too, the user's words while it runs move it to the background and the answer comes at once: a question
+/// asked during a four-minute boot was read only after the user gave up and pressed Stop.
+// ponytail: run_tests and build_project still hold a question until they end; their verdicts need the whole run.
 async fn execute_keeping(ctx: &Ctx, program: &str, argv: Vec<String>, reason: &str, limit: Option<Duration>, stdin: Option<&str>, keep: bool) -> Result<Ran, Output> {
     let mut launch = prepare(ctx, program.trim(), argv).map_err(Output::fail)?;
     let short = match stdin {
@@ -749,7 +771,17 @@ async fn execute_keeping(ctx: &Ctx, program: &str, argv: Vec<String>, reason: &s
     // Two runs in one second, or the same second of another day: the next free name.
     let name = (1..).map(|n| if n == 1 { format!(".outputs/{stamp}-{stem}.txt") } else { format!(".outputs/{stamp}-{stem}-{n}.txt") }).find(|name| !ctx.root.join(name).exists()).unwrap_or_default();
     let keeper = keep.then(|| Arc::new(Mutex::new(Kept { path: ctx.root.join(&name), file: None, bytes: 0 })));
-    let (code, out, timed_out) = run_to_end(child, limit, keeper.clone()).await;
+    let (code, out, timed_out) = match run_to_end(child, limit, keeper.clone(), keep.then_some(ctx)).await {
+        Ended::Ran(code, out, timed_out) => (code, out, timed_out),
+        Ended::Spoken(child, log) => {
+            // ponytail: in the background its timeout_ms no longer applies; stop_process ends it.
+            let id = ctx.procs.track(ctx.state_dir.clone(), launch.display.clone(), child, log.clone(), ctx.emit.clone());
+            let so_far = last_chars(&log.lock().unwrap(), 4_000);
+            let state = format!("{} goes on running in the background as process {id}: wait_for_output with that id waits for it to end, read_process shows its output, stop_process stops it", launch.display);
+            let tail = if so_far.trim().is_empty() { String::new() } else { format!("\n\nOutput so far:\n{so_far}") };
+            return Err(Output::ok(format!("{}{tail}", spoken_while_waiting(started, &state)), "The user said something"));
+        }
+    };
     let kept = keeper.and_then(|keeper| {
         let mut kept = keeper.lock().unwrap();
         // Closed before it is named or removed.
@@ -967,7 +999,7 @@ pub async fn run_command(ctx: &Ctx, args: &Value) -> Output {
             out.text.push_str(&note);
             out
         }
-        Err(refused) => refused,
+        Err(early) => early,
     }
 }
 
@@ -1089,23 +1121,8 @@ impl Procs {
         if let Some(p) = child.stderr.take() {
             pump(p, log.clone(), None);
         }
-        let exit = Arc::new(Mutex::new(None));
-        let ended = Arc::new(Mutex::new(None));
-        let proc = Arc::new(Proc { display, pid: child.id().unwrap_or(0), owner, started: Instant::now(), log: log.clone(), exit: exit.clone(), ended: ended.clone(), stopped: AtomicBool::new(false), stdin: tokio::sync::Mutex::new(child.stdin.take()) });
-        let id = format!("p{}", self.next.fetch_add(1, Ordering::Relaxed) + 1);
-        {
-            let mut map = self.map.lock().unwrap();
-            // A process that ended half an hour ago is let go with its log (up to 1 MB): a day of servers started and
-            // stopped kept every one of them.
-            map.retain(|_, p| p.ended.lock().unwrap().is_none_or(|at| at.elapsed() < Duration::from_secs(1800)));
-            map.insert(id.clone(), proc.clone());
-        }
-        tokio::spawn(async move {
-            let code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1);
-            *exit.lock().unwrap() = Some(code);
-            *ended.lock().unwrap() = Some(Instant::now());
-            wake.wake();
-        });
+        let id = self.track(owner, display, child, log.clone(), wake);
+        let proc = self.map.lock().unwrap()[&id].clone();
         // One that is gone already need not be waited out.
         let until = Instant::now() + grace;
         while Instant::now() < until && proc.exit.lock().unwrap().is_none() {
@@ -1117,6 +1134,28 @@ impl Procs {
         }
         let shown = log_shown(&log.lock().unwrap().clone());
         (id, *proc.exit.lock().unwrap(), shown)
+    }
+
+    /// Takes a running process whose output already flows into `log` into the list, and returns its id.
+    fn track(&self, owner: PathBuf, display: String, mut child: Child, log: Arc<Mutex<String>>, wake: crate::agent::Emitter) -> String {
+        let exit = Arc::new(Mutex::new(None));
+        let ended = Arc::new(Mutex::new(None));
+        let proc = Arc::new(Proc { display, pid: child.id().unwrap_or(0), owner, started: Instant::now(), log, exit: exit.clone(), ended: ended.clone(), stopped: AtomicBool::new(false), stdin: tokio::sync::Mutex::new(child.stdin.take()) });
+        let id = format!("p{}", self.next.fetch_add(1, Ordering::Relaxed) + 1);
+        {
+            let mut map = self.map.lock().unwrap();
+            // A process that ended half an hour ago is let go with its log (up to 1 MB): a day of servers started and
+            // stopped kept every one of them.
+            map.retain(|_, p| p.ended.lock().unwrap().is_none_or(|at| at.elapsed() < Duration::from_secs(1800)));
+            map.insert(id.clone(), proc);
+        }
+        tokio::spawn(async move {
+            let code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1);
+            *exit.lock().unwrap() = Some(code);
+            *ended.lock().unwrap() = Some(Instant::now());
+            wake.wake();
+        });
+        id
     }
 
     /// How many are still running, for the header badge.
@@ -1461,6 +1500,27 @@ mod tests {
         assert!(note.contains("found on PATH") && note.ends_with("`.\\cmd.exe` runs that one.]"), "{note}");
         assert!(shadowed(&root, "cmd").is_some() && shadowed(&root, ".\\cmd.exe").is_none() && shadowed(&root, "whoami").is_none());
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A command of minutes must not sit on a question either: it goes on in the background, and the answer comes now.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_long_command_steps_aside_when_the_user_says_something() {
+        let dir = crate::tools::scratch("runnote");
+        let ctx = crate::tools::test_ctx(&dir, Approval::Auto);
+        let notes = ctx.notes.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            notes.lock().unwrap().push("btw it shows a black screen".into());
+        });
+        let slow = if cfg!(windows) { json!({ "command": "powershell", "args": ["echo booting; Start-Sleep -Seconds 30"], "timeout_ms": 240_000 }) } else { json!({ "command": "sh", "args": ["-c", "echo booting; sleep 30"], "timeout_ms": 240_000 }) };
+        let ran = tokio::time::timeout(Duration::from_secs(20), run_command(&ctx, &slow)).await.expect("the command held the question");
+        assert!(ran.ok && ran.text.starts_with("Stopped waiting after") && ran.text.contains("background as process p") && ran.text.contains("booting"), "{}", ran.text);
+        assert_eq!(ran.summary, "The user said something");
+        // Left running, and tracked like one started in the background.
+        let id = ran.text.split_once("as process ").and_then(|(_, rest)| rest.split(':').next()).unwrap_or_default().to_string();
+        assert!(ctx.procs.get(&id, &ctx.state_dir).is_some_and(|p| p.exit.lock().unwrap().is_none()), "{id}");
+        let _ = stop_process(&ctx, &json!({ "id": id }));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A wait of minutes must not sit on a question. The user types while the reply works, and the next round reads

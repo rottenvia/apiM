@@ -383,7 +383,6 @@ mod tests {
 pub enum SendKind {
     Send { enabled: bool },
     Stop,
-    Note,
 }
 
 /// `.send-btn`: the round button at the end of the composer.
@@ -409,10 +408,6 @@ pub fn send_btn(ui: &mut Ui, kind: SendKind, tip: &str) -> Response {
             painter.circle_filled(rect.center(), radius, lerp(Color32::TRANSPARENT, alpha(p.danger, 16.0), t));
             painter.circle_stroke(rect.center(), radius - 0.5, Stroke::new(1.0, alpha(p.danger, 35.0)));
             icons::paint(ui, icons::STOP, rect.center(), 12.0, p.danger);
-        }
-        SendKind::Note => {
-            painter.circle_filled(rect.center(), radius, lerp(theme::mix(p.search, 88.0, Color32::BLACK), p.search, t));
-            icons::paint(ui, icons::NOTE, rect.center(), 16.0, Color32::WHITE);
         }
     }
     response.on_hover_text(tip)

@@ -109,6 +109,8 @@ pub enum Event {
     ModelAdded(crate::models::CustomModel),
     /// A one-line note shown in the reply: retrying, continuing, context trimmed.
     Notice(String),
+    /// The reply read this many of the words the user passed to it while it ran, oldest first: they take their place here.
+    Heard(usize),
     /// The transcript so far, in the shape of the web's `resumeState`: kept on the reply so Resume can replay it.
     Checkpoint(Value),
     /// The restore point saved before the reply began, for its question (None: there were no files to save).
@@ -862,7 +864,11 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
             emit.send(Event::Groups(groups.clone()));
         }
         // Anything the user said in passing joins the conversation before the next request.
-        for note in std::mem::take(&mut *notes.lock().unwrap()) {
+        let heard = std::mem::take(&mut *notes.lock().unwrap());
+        if !heard.is_empty() {
+            emit.send(Event::Heard(heard.len()));
+        }
+        for note in heard {
             noted = true;
             messages.push(user(format!("{NOTE_LEAD}\n{note}")));
         }

@@ -75,6 +75,7 @@ fn read(conv: &Conversation) -> String {
                     out.push(format!("⚙ {} ({}{}){}", t.name, dur(t.duration_ms), verdict, summary));
                 }
                 Part::Notice(n) => out.push(format!("— {n}")),
+                Part::Said(text) => out.push(format!("**You:** {}", text.trim())),
                 _ => {}
             }
         }
@@ -142,6 +143,7 @@ fn trace(conv: &Conversation) -> String {
                     out.push(format!("  {:<18} {:>6} at {:<7} {} {}{}", t.name, dur(t.duration_ms), at, verdict, first_line(&t.summary, 80), note));
                 }
                 Part::Notice(n) => out.push(format!("  — {n}")),
+                Part::Said(text) => out.push(format!("  you: {}", first_line(text.trim(), 80))),
                 _ => {}
             }
         }

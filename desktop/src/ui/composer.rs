@@ -187,18 +187,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             let enter = edit.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
             super::slash_menu::after_edit(app, ui, &edit, !menu.1.is_empty());
 
-            // Anything in the box reaches the running task, so the button says so rather than offering to stop: with
+            // Anything in the box goes to the running task, so the button sends rather than offering to stop: with
             // the box empty it is Stop again, and `/stop` is there either way.
             let is_note = running && (!app.draft.trim().is_empty() || !app.attachments.is_empty());
-            if is_note {
-                ui.horizontal(|ui| {
-                    ui.add_space(16.0);
-                    ui.spacing_mut().item_spacing.x = 6.0;
-                    pulse(ui);
-                    ui.label(widgets::text("Reaches the running task — nothing stops", 11.0, W::Regular, p.search));
-                });
-                ui.add_space(4.0);
-            }
 
             ui.add_space(2.0);
             let send = row(app, ui, running, is_note, has_keys);
@@ -248,14 +239,6 @@ pub fn resume_note(text: &str) -> Option<&str> {
     Some(rest.trim_start_matches(|c: char| c.is_whitespace() || matches!(c, ',' | ':' | '.' | '—' | '-')).trim_end())
 }
 
-/// The teal dot that breathes beside a note (`.btw-pulse`).
-fn pulse(ui: &mut egui::Ui) {
-    let (rect, _) = ui.allocate_exact_size(vec2(6.0, 16.0), Sense::hover());
-    let t = ((ui.input(|i| i.time) / 1.5 * std::f64::consts::TAU).sin() as f32 + 1.0) / 2.0;
-    ui.painter().circle_filled(rect.center(), 3.0 * (0.8 + 0.2 * t), p().search.gamma_multiply(0.25 + 0.75 * t));
-    ui.ctx().request_repaint_after(std::time::Duration::from_millis(50));
-}
-
 /// The bottom row. Returns true when Send was pressed.
 fn row(app: &mut App, ui: &mut egui::Ui, running: bool, is_note: bool, has_keys: bool) -> bool {
     let p = p();
@@ -293,16 +276,14 @@ fn row(app: &mut App, ui: &mut egui::Ui, running: bool, is_note: bool, has_keys:
     // Right side first, so the chips in the middle know how much room is left.
     let start = ui.cursor().min;
     let right = ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-        let kind = if running && is_note {
-            SendKind::Note
-        } else if running {
+        let kind = if running && !is_note {
             SendKind::Stop
         } else {
-            SendKind::Send { enabled: has_keys && (!app.draft.trim().is_empty() || !app.attachments.is_empty()) && !app.compacting() }
+            SendKind::Send { enabled: is_note || has_keys && (!app.draft.trim().is_empty() || !app.attachments.is_empty()) && !app.compacting() }
         };
         let tip = match kind {
-            SendKind::Note => "Pass it to the running task — won't interrupt it",
             SendKind::Stop => "Stop generating",
+            SendKind::Send { .. } if is_note => "Send — the running task reads it before its next step, without stopping",
             SendKind::Send { .. } => "Send message",
         };
         if widgets::send_btn(ui, kind, tip).clicked() {

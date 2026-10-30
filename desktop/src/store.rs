@@ -354,6 +354,8 @@ pub enum Part {
     Tool(ToolEvent),
     /// A one-line note from the app: retried, continued, stopped.
     Notice(String),
+    /// What the user said while the reply ran, where the reply read it (as it went to the model, file notes and all).
+    Said(String),
 }
 
 /// A file sent with a message. Pictures carry their bytes as a data URL, like the web app stores them.
@@ -420,7 +422,7 @@ pub struct Message {
     pub search_usd: f64,
     pub plugins_used: Vec<String>,
     pub context_breakdown: Vec<Bucket>,
-    /// A "btw" note added while a reply was running: shown as a chip, not a bubble.
+    /// A "btw" note added while a reply was running, in chats from before such words went into the reply (`Part::Said`).
     pub note: bool,
     /// Thinking the web app saved without a place among the steps. Shown as one box above them.
     pub loose_reasoning: String,
@@ -564,6 +566,8 @@ mod wire {
         Think { start: usize, end: usize },
         /// Desktop only: a one-line note from the app.
         Notice { text: String },
+        /// Desktop only: what the user said while the reply ran.
+        Said { text: String },
     }
 
     #[derive(Serialize, Deserialize, Default)]
@@ -757,6 +761,7 @@ impl From<wire::Msg> for Message {
                     match step {
                         wire::Step::Text { text } => parts.push(Part::Text(text)),
                         wire::Step::Notice { text } => parts.push(Part::Notice(text)),
+                        wire::Step::Said { text } => parts.push(Part::Said(text)),
                         wire::Step::Tool { id } => parts.extend(tools.remove(&id).map(Part::Tool)),
                         wire::Step::Think { start, end } => {
                             let (a, b) = (floor_char(&reasoning, utf16_to_byte(&reasoning, start)), floor_char(&reasoning, utf16_to_byte(&reasoning, end)));
@@ -834,6 +839,7 @@ impl From<&Message> for wire::Msg {
             match part {
                 Part::Text(text) => timeline.push(wire::Step::Text { text: text.clone() }),
                 Part::Notice(text) => timeline.push(wire::Step::Notice { text: text.clone() }),
+                Part::Said(text) => timeline.push(wire::Step::Said { text: text.clone() }),
                 Part::Thinking { text, .. } => {
                     let len = utf16_len(text);
                     timeline.push(wire::Step::Think { start: at, end: at + len });

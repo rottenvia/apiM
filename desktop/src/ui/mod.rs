@@ -145,8 +145,10 @@ struct Run {
     retry: Option<(String, Instant)>,
     approval: Option<PendingApproval>,
     question: Option<PendingQuestion>,
-    /// "btw" notes typed while it works, picked up before its next round.
+    /// What the user says while it works, picked up before its next round.
     notes: Arc<Mutex<Vec<String>>>,
+    /// The same words, as sent and with their files, until the reply reads them (`Event::Heard`): they wait under it.
+    pending: Vec<(String, Vec<Attachment>)>,
     thinking: Stopwatch,
     started: Instant,
     /// When the agent last reported anything: a reply gone quiet says so (`chat::wait_rows`).
@@ -171,12 +173,14 @@ impl Run {
     /// text before them is on screen. The step that starts has the same id and goes on in the same row: it used to
     /// come only once its call was whole, a beat after the fold, with a status line between that hardly stood.
     // ponytail: a call the agent never starts (a guard ends the run between calls) shows until the reply ends.
+    /// What the user said that it has not read yet comes after them, at the foot of the reply.
     fn drafted(&self) -> Vec<Part> {
+        let said = self.pending.iter().map(|(text, _)| Part::Said(text.clone()));
         if !drafts_show(self.folded, &self.typing) {
-            return Vec::new();
+            return said.collect();
         }
         let size = |chars: usize| if chars >= 1000 { format!("{:.1}k chars", chars as f64 / 1000.0) } else { String::new() };
-        self.drafts.iter().filter(|d| !d.name.is_empty()).inspect(|d| d.shown.set(d.shown.get().or_else(|| Some(Instant::now())))).map(|d| Part::Tool(store::ToolEvent { id: d.id.clone(), name: d.name.clone(), args: d.head.clone(), summary: size(d.chars), ..Default::default() })).collect()
+        self.drafts.iter().filter(|d| !d.name.is_empty()).inspect(|d| d.shown.set(d.shown.get().or_else(|| Some(Instant::now())))).map(|d| Part::Tool(store::ToolEvent { id: d.id.clone(), name: d.name.clone(), args: d.head.clone(), summary: size(d.chars), ..Default::default() })).chain(said).collect()
     }
 }
 
@@ -622,7 +626,7 @@ impl App {
                     self.runs.last_mut().unwrap().approval = Some(PendingApproval { command: folder.into(), reason: "To look at files outside this chat's folder. Nothing there is changed.".into(), key: format!("look:{}", folder.to_lowercase()), mcp: false, reply });
                 }
                 "btw" => {
-                    // A note passed to the running reply: a quiet line above it, at once.
+                    // Words passed to the running reply: the user's bubble at its foot, at once.
                     self.fake_run(true);
                     self.pass_note("also keep the old tests green".into());
                 }
@@ -724,6 +728,7 @@ impl App {
             approval: None,
             question: None,
             notes: Default::default(),
+            pending: Vec::new(),
             thinking: Stopwatch::new(),
             started: Instant::now(),
             heard: Instant::now(),
@@ -1186,20 +1191,17 @@ impl App {
         self.send(ctx, wire, attached);
     }
 
-    /// Hands a note to the reply being written without stopping it ("btw …", `/btw`). It shows in the chat at
-    /// once, as a quiet line above the reply; the reply reads it before its next step.
+    /// Hands what was typed to the reply being written, without stopping it. It shows at once as the user's bubble at
+    /// the reply's foot, and stays where the reply read it, before its next step. It used to be a "NOTE" line above
+    /// the reply, far from where it was said, and a question asked during a long command sat unread under it.
     fn pass_note(&mut self, note: String) {
-        let Some(run) = self.runs.iter().find(|run| run.conv_id == self.conv.id) else { return };
+        let Some(run) = self.runs.iter_mut().find(|run| run.conv_id == self.conv.id) else { return };
         // ponytail: a picture on a note is described (or, on a native model, left out) rather than sent as pixels. Send it as a picture part if notes with screenshots matter.
         let (wire, attached) = attachments::message(&note, std::mem::take(&mut self.attachments), attachments::model_vision(&self.settings));
         run.notes.lock().unwrap().push(wire.clone());
-        let mut chip = Message::new(Role::User, &note);
-        chip.note = true;
-        chip.attachments = attached;
-        let at = self.conv.messages.len().saturating_sub(1);
-        self.conv.messages.insert(at, chip);
-        self.heights.values_mut().for_each(|m| m.exact = false);
+        run.pending.push((wire, attached));
         self.draft.clear();
+        self.jump_to_latest = true;
     }
 
     fn send(&mut self, ctx: &egui::Context, text: String, attached: Vec<Attachment>) {
@@ -1309,6 +1311,7 @@ impl App {
             approval: None,
             question: None,
             notes,
+            pending: Vec::new(),
             thinking: Stopwatch::new(),
             started,
             heard: Instant::now(),
@@ -1520,6 +1523,8 @@ impl App {
                 }
             }
             msg.incomplete = true;
+            // What was said and not read yet stays where it was said.
+            msg.parts.extend(run.pending.drain(..).map(|(text, _)| Part::Said(text)));
             msg.parts.push(Part::Notice("Stopped.".into()));
         }
         conv.updated_at = store::now_ms();
@@ -1531,7 +1536,7 @@ impl App {
     /// Applies everything the agents reported since the last frame, in every chat that has a reply running.
     fn pump(&mut self, ctx: &egui::Context) {
         let mut runs = std::mem::take(&mut self.runs);
-        let mut ended = Vec::new();
+        let mut ended: Vec<Run> = Vec::new();
         let mut i = 0;
         while i < runs.len() {
             if self.pump_run(ctx, &mut runs[i]) {
@@ -1543,6 +1548,12 @@ impl App {
         self.runs = runs;
         for run in &ended {
             self.refresh_summary(ctx, &run.conv_id, run.parked.as_ref());
+        }
+        // Words passed too late for the reply to read them go out as the next message, so they are answered.
+        let late: Vec<(String, Vec<Attachment>)> = ended.iter_mut().filter(|run| run.conv_id == self.conv.id).flat_map(|run| std::mem::take(&mut run.pending)).collect();
+        if !late.is_empty() && !self.running_here() {
+            let (texts, files): (Vec<String>, Vec<Vec<Attachment>>) = late.into_iter().unzip();
+            self.send(ctx, texts.join("\n\n"), files.concat());
         }
         if !ended.is_empty() {
             self.files_stale = true;
@@ -1571,6 +1582,7 @@ impl App {
         }
         // A reply to a chat that is not the one on screen has nobody to type for, and neither has a window that is down.
         let watched = run.parked.is_none() && ctx.input(|i| i.viewport().visible()) != Some(false);
+        let parked = run.parked.is_some();
         let conv = match run.parked.as_mut() {
             Some(parked) => parked,
             None => &mut self.conv,
@@ -1740,6 +1752,12 @@ impl App {
                     run.arrived = Some(Instant::now());
                     msg.parts.push(Part::Notice(note));
                 }
+                // Already on screen at the reply's foot; from here on it stays where it was read.
+                Event::Heard(n) => {
+                    close_thinking(msg, &mut run.thinking);
+                    let n = n.min(run.pending.len());
+                    msg.parts.extend(run.pending.drain(..n).map(|(text, _)| Part::Said(text)));
+                }
                 Event::Checkpoint(state) => {
                     msg.other.insert("resumeState".into(), state);
                 }
@@ -1800,6 +1818,10 @@ impl App {
             }
         }
         if finished {
+            // A chat not on screen cannot send them on (`pump`): they stay in the reply, where they were said.
+            if let Some(msg) = conv.messages.last_mut().filter(|_| parked) {
+                msg.parts.extend(run.pending.drain(..).map(|(text, _)| Part::Said(text)));
+            }
             self.heights.values_mut().for_each(|m| m.exact = false);
             // Text that sat unshown for seconds is this program's doing, whatever the model's pace: it goes in the
             // problem report, so pacing that misbehaves on some stream nobody tried is found afterwards.

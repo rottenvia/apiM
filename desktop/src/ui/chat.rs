@@ -187,7 +187,7 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
     // Find in this chat: how many matches each message holds, and which of them is the focused one.
     // ponytail: counted again every frame the bar is open; cache per (chat, query) if a long chat stutters.
     let matcher = if app.find_open { crate::find::Matcher::new(&app.find, app.finder.whole_word) } else { None };
-    let counts: Vec<usize> = matcher.as_ref().map_or(Vec::new(), |m| app.conv.messages.iter().map(|msg| if msg.note { 0 } else { m.ranges(&msg.text()).len() }).collect());
+    let counts: Vec<usize> = matcher.as_ref().map_or(Vec::new(), |m| app.conv.messages.iter().map(|msg| m.ranges(&msg.text()).len()).collect());
     let total: usize = counts.iter().sum();
     app.finder.active = app.finder.active.min(total.saturating_sub(1));
     let located = crate::find::locate(&counts, app.finder.active);
@@ -429,7 +429,7 @@ pub fn messages(app: &mut App, ui: &mut egui::Ui) {
                     if let Some(stretch) = kept.filter(|_| !seen) {
                         lazy::offstage(ui, stretch);
                     }
-                    let mut env = bubble::Env { settings, workspace: &workspace, live, newest: i == last, busy: running, cap, thinking_secs, drafted: &drafted, editing, action: &mut action, rewind, marks: marks.take(), rows };
+                    let mut env = bubble::Env { settings, workspace: &workspace, live, newest: i == last, busy: running, cap, edge: ui.max_rect().right(), thinking_secs, drafted: &drafted, editing, action: &mut action, rewind, marks: marks.take(), rows };
                     ui.push_id(&msg.id, |ui| bubble::show(ui, msg, &mut env));
                     marks = env.marks.take();
                 });
@@ -633,6 +633,7 @@ fn guess(msg: &Message, width: f32) -> f32 {
             Part::Tool(_) => 31.0,
             Part::Thinking { .. } => 40.0,
             Part::Notice(_) => 32.0,
+            Part::Said(_) => 68.0,
         })
         .sum::<f32>()
 }

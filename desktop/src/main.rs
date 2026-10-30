@@ -330,6 +330,7 @@ fn headless(args: &[String]) {
                 let _ = reply.send(String::new());
             }
             Notice(n) => println!("\n[{n}]"),
+            Heard(n) => println!("\n[read {n} note(s)]"),
             Retry { reason, wait, .. } => println!("\n[{reason} Retrying in {}s]", wait.as_secs()),
             Usage(u) => eprintln!("\n[tokens in {} out {} cached {} cost {:.5}]", u.prompt, u.completion, u.cache_hit, u.cost(&model, &customs).unwrap_or(0.0)),
             Done { finish, incomplete, stop_reason } => {

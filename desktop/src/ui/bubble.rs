@@ -54,6 +54,8 @@ pub struct Env<'a, 'm> {
     pub busy: bool,
     /// Bubbles are capped at 85% of the column on a narrow window, 75% otherwise.
     pub cap: f32,
+    /// The column's right edge, where the user's bubbles end: words they said into a reply line up with their messages.
+    pub edge: f32,
     /// Seconds the model has been thinking in this stretch, while it does.
     pub thinking_secs: Option<u64>,
     /// The tool calls the live reply is still writing, as the steps they will be (`Run::drafted`).
@@ -72,7 +74,6 @@ pub struct Env<'a, 'm> {
 pub fn show(ui: &mut Ui, msg: &Message, env: &mut Env) {
     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
     match msg.role {
-        Role::User if msg.note => note(ui, msg),
         Role::User => user(ui, msg, env),
         Role::Assistant => assistant(ui, msg, env),
     }
@@ -97,40 +98,22 @@ pub fn dots(ui: &mut Ui, size: f32, colour: Color32) {
 
 // ------------------------------------------------------------------ user
 
-/// A "btw" passed to a running reply: a quiet centred line, not a bubble.
-fn note(ui: &mut Ui, msg: &Message) {
+/// What the user said while the reply ran, where the reply read it: their own bubble, as any message of theirs, without
+/// a message's hover actions (it is part of the reply, and goes with it).
+fn said_bubble(ui: &mut Ui, text: &str, env: &Env) {
     let p = p();
-    let text = msg.text();
-    let long = text.chars().count() > 140;
-    let id = ui.id().with("note-open");
-    let mut open: bool = ui.data(|d| d.get_temp(id)).unwrap_or(false);
-    ui.vertical_centered(|ui| {
-        ui.set_max_width(ui.available_width() * 0.9);
-        ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = vec2(8.0, 2.0);
-            let chip = widgets::galley(ui, "NOTE", theme::font(11.0, W::Semibold), p.search);
-            let (rect, _) = ui.allocate_exact_size(vec2(chip.size().x + 13.0, 20.5), Sense::hover());
-            ui.painter().rect_filled(rect, 8.0, alpha(p.search, 20.0));
-            widgets::text_at(ui, rect.left() + 6.0, rect.center().y, chip);
-            plain(ui, widgets::lines("passed while the task was running", 11.0, 16.5, W::Regular, p.muted));
-            let shown = if long && !open { format!("{}…", text.chars().take(140).collect::<String>().trim_end()) } else { text.clone() };
-            let body = ui.add(egui::Label::new(widgets::lines(shown, 12.0, 20.0, W::Regular, p.text2)).wrap().sense(if long { Sense::click() } else { Sense::hover() }));
-            if long {
-                let more = ui.add(egui::Label::new(widgets::text(if open { "show less" } else { "more" }, 11.0, W::Regular, p.muted)).selectable(false).sense(Sense::click()));
-                if body.on_hover_text(if open { "Collapse" } else { "Expand" }).clicked() || more.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                    open = !open;
-                    ui.data_mut(|d| d.insert_temp(id, open));
-                }
-            }
-            // What was attached to the note, by name.
-            for file in &msg.attachments {
-                let name = widgets::galley(ui, &file.name, theme::font(11.0, W::Regular), p.text2);
-                let (rect, _) = ui.allocate_exact_size(vec2(name.size().x + 14.0, 22.5), Sense::hover());
-                ui.painter().rect(rect, 8.0, alpha(p.bg2, 60.0), Stroke::new(1.0, p.border), StrokeKind::Inside);
-                widgets::text_at(ui, rect.left() + 7.0, rect.center().y, name);
-            }
-        });
-    });
+    const PAD: egui::Vec2 = vec2(16.0, 10.0);
+    // It went to the model with a note for each file; the bubble keeps the words.
+    let body = without_file_notes(text).trim_matches(['\n', '\r']);
+    let body = if body.trim().is_empty() { text.trim() } else { body };
+    let mut job = egui::text::LayoutJob::simple(body.to_string(), theme::font(15.0, W::Regular), p.text, (env.cap - PAD.x * 2.0).max(80.0));
+    job.sections.iter_mut().for_each(|s| s.format.line_height = Some(24.0));
+    let galley = ui.painter().layout_job(job);
+    let top = ui.cursor().top();
+    let card = Rect::from_min_max(pos2(env.edge - galley.size().x.max(8.0) - PAD.x * 2.0, top), pos2(env.edge, top + galley.size().y + PAD.y * 2.0));
+    ui.painter().rect_filled(card, 16.0, p.elevated);
+    ui.new_child(egui::UiBuilder::new().max_rect(card.shrink2(PAD))).add(egui::Label::new(galley).selectable(true));
+    ui.allocate_space(vec2(ui.available_width(), card.height()));
 }
 
 /// Bytes of a `data:image/png;base64,…` URL.
@@ -1315,7 +1298,7 @@ fn sources(ui: &mut Ui, msg: &Message, env: &mut Env) {
 fn interrupted(ui: &mut Ui, msg: &Message, env: &mut Env) {
     let p = p();
     // Anything that arrived can be carried on: text, thinking or a step.
-    let can_resume = msg.parts.iter().any(|part| !matches!(part, Part::Notice(_)));
+    let can_resume = msg.parts.iter().any(|part| !matches!(part, Part::Notice(_) | Part::Said(_)));
     egui::Frame::new().fill(alpha(p.warning, 7.0)).stroke(Stroke::new(1.0, alpha(p.warning, 30.0))).corner_radius(12).show(ui, |ui| {
         ui.set_width(ui.available_width());
         egui::Frame::new().inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
@@ -1508,8 +1491,9 @@ fn assistant(ui: &mut Ui, msg: &Message, env: &mut Env) {
     let _ = p;
 }
 
-/// One timeline row: its prose fragments, the tools it ran, its reasoning (and whether that is still streaming), its notice.
-type TimelineRow<'a> = (Vec<&'a str>, Vec<&'a ToolEvent>, Option<(Cow<'a, str>, bool)>, Option<&'a str>);
+/// One timeline row: its prose fragments, the tools it ran, its reasoning (and whether that is still streaming), its line
+/// apart: a notice, or (true) what the user said into the reply.
+type TimelineRow<'a> = (Vec<&'a str>, Vec<&'a ToolEvent>, Option<(Cow<'a, str>, bool)>, Option<(&'a str, bool)>);
 
 /// Groups a reply's parts into timeline rows, as the web's `buildTimelineRows` does: prose keeps adding to its row until a
 /// tool or reasoning comes, a tool joins the row above it unless reasoning came last, and reasoning split across parts reads
@@ -1528,7 +1512,8 @@ pub fn timeline_rows<'a>(parts: &[&'a Part], live: bool) -> Vec<TimelineRow<'a>>
                     _ => rows.push((Vec::new(), Vec::new(), Some((Cow::Borrowed(text.as_str()), streaming)), None)),
                 }
             }
-            Part::Notice(text) => rows.push((Vec::new(), Vec::new(), None, Some(text.as_str()))),
+            Part::Notice(text) => rows.push((Vec::new(), Vec::new(), None, Some((text.as_str(), false)))),
+            Part::Said(text) => rows.push((Vec::new(), Vec::new(), None, Some((text.as_str(), true)))),
             Part::Text(text) => match rows.last_mut() {
                 Some((texts, tools, None, None)) if tools.is_empty() => texts.push(text.as_str()),
                 _ => rows.push((vec![text.as_str()], Vec::new(), None, None)),
@@ -1670,7 +1655,7 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
                 split,
                 chars,
                 think.as_ref().map(|(thought, live)| (thought.len(), *live)),
-                notice.map(str::len),
+                notice.map(|(line, said)| (line.len(), said)),
                 tools.iter().map(|tool| (tool.ok, tool.image.is_some(), tool.summary.len(), tool.args.len(), open.as_deref() == Some(tool.id.as_str()))).collect::<Vec<_>>(),
                 // A row that shows a picture is as tall as what is known of that picture.
                 tools.iter().any(|tool| tool.name == "show_image").then(super::trim::generation),
@@ -1685,7 +1670,9 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
                 place.apply(ui);
                 if let Some((thought, live)) = think {
                     hung(ui, |ui| think_row(ui, thought, *live, env));
-                } else if let Some(notice) = notice {
+                } else if let Some((said, true)) = notice {
+                    said_bubble(ui, said, env);
+                } else if let Some((notice, _)) = notice {
                     // A notice new to the reply unfolds as a step does: the route line came in whole and pushed
                     // "Thinking…" down by two lines in a frame.
                     let come = widgets::arrival(ui, ui.id().with("born"), writing, STEP_IN);
@@ -1730,16 +1717,21 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
             gap(ui, 12.0);
             prose(ui, &text, colour, env, lazy::print((&msg.id, usize::MAX)));
         }
-        for (i, part) in msg.parts.iter().enumerate() {
-            if let Part::Notice(notice) = part {
-                ui.push_id(("notice", i), |ui| {
-                    let come = widgets::arrival(ui, ui.id().with("born"), env.live && i + 1 == msg.parts.len(), STEP_IN);
+        for (i, part) in parts.iter().enumerate() {
+            match part {
+                Part::Notice(notice) => ui.push_id(("notice", i), |ui| {
+                    let come = widgets::arrival(ui, ui.id().with("born"), env.live && i + 1 == parts.len(), STEP_IN);
                     widgets::unfold(ui, ui.id().with("in"), come, |ui| {
                         gap(ui, 12.0);
                         notice_line(ui, notice);
                     });
-                });
-            }
+                }),
+                Part::Said(said) => ui.push_id(("said", i), |ui| {
+                    gap(ui, 12.0);
+                    said_bubble(ui, said, env);
+                }),
+                _ => continue,
+            };
         }
     }
     if open != was_open {

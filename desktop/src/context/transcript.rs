@@ -8,18 +8,51 @@
 
 use crate::media::multimodal::{Media, MediaWindow, build_user_content, user_has_content};
 use crate::models::Vision;
-use crate::store::{Attachment, HistorySummary, Message, Role};
+use crate::store::{Attachment, HistorySummary, Message, Part, Role};
 use crate::summary;
 use serde_json::{Value, json};
 
-/// A finished user or assistant turn with text or media: the turns the web replays (its `replayable`).
+/// A finished user or assistant turn with text or media: the turns the web replays (its `replayable`). What the user
+/// said into a reply replays even when the reply does not: told mid-reply why it was stopped, the next reply never
+/// heard it.
 pub fn replays(m: &Message) -> bool {
-    matches!(m.role, Role::User | Role::Assistant) && (!m.text().trim().is_empty() || !m.attachments.is_empty()) && !m.incomplete
+    let said = m.parts.iter().any(|part| matches!(part, Part::Said(_)));
+    matches!(m.role, Role::User | Role::Assistant) && (said || (!m.text().trim().is_empty() || !m.attachments.is_empty()) && !m.incomplete)
 }
 
 /// The earlier turns a request replays, oldest first, as (role, prose, attachments): the rolling window the web keeps.
 pub fn history(messages: &[Message], stored: Option<&HistorySummary>) -> Vec<(Role, String, Vec<Attachment>)> {
-    summary::shape(messages, stored).verbatim.iter().map(|m| (m.role, stamped(m), m.attachments.clone())).collect()
+    summary::shape(messages, stored).verbatim.iter().flat_map(|m| turns(m)).collect()
+}
+
+/// One message as turns. A reply the user spoke into while it ran is its words before, theirs, and its words after:
+/// the order the model read them in.
+fn turns(m: &Message) -> Vec<(Role, String, Vec<Attachment>)> {
+    if !m.parts.iter().any(|part| matches!(part, Part::Said(_))) {
+        return vec![(m.role, stamped(m), m.attachments.clone())];
+    }
+    let (mut out, mut reply) = (Vec::new(), String::new());
+    for part in &m.parts {
+        match part {
+            Part::Text(text) => {
+                if !reply.is_empty() && !reply.ends_with('\n') {
+                    reply.push_str("\n\n");
+                }
+                reply.push_str(text);
+            }
+            Part::Said(said) => {
+                if !reply.trim().is_empty() && !m.incomplete {
+                    out.push((Role::Assistant, std::mem::take(&mut reply), Vec::new()));
+                }
+                out.push((Role::User, said.clone(), Vec::new()));
+            }
+            _ => {}
+        }
+    }
+    if !m.incomplete {
+        out.push((Role::Assistant, reply, m.attachments.clone()));
+    }
+    out
 }
 
 /// A user's message as the model reads it: after when it was sent, so "how long did I run" and "I'm back" can be
@@ -38,7 +71,7 @@ fn stamped(m: &Message) -> String {
 /// itself, which stands after the question.
 pub fn history_before(messages: &[Message], question: usize, stored: Option<&HistorySummary>) -> Vec<(Role, String, Vec<Attachment>)> {
     let earlier: std::collections::HashSet<&str> = messages[..question].iter().map(|m| m.id.as_str()).collect();
-    summary::shape(messages, stored).verbatim.iter().filter(|m| earlier.contains(m.id.as_str())).map(|m| (m.role, stamped(m), m.attachments.clone())).collect()
+    summary::shape(messages, stored).verbatim.iter().filter(|m| earlier.contains(m.id.as_str())).flat_map(|m| turns(m)).collect()
 }
 
 /// The web's `mediaWindowFor`: on a native model the two newest pictures in the history ride in full, and a clip never
@@ -225,5 +258,16 @@ mod tests {
             "toolEvents": [{ "id": "t1", "name": "list_files", "args": "{}", "ok": true, "summary": "Listed src" }]
         }));
         assert_eq!(history(&[reply], None), vec![(Role::Assistant, "There are three files.".to_string(), Vec::new())]);
+    }
+
+    /// Words the user passed to a running reply replay where it read them, and still replay when they stopped it.
+    #[test]
+    fn what_the_user_said_into_a_reply_replays_in_its_place() {
+        let mut reply = Message::new(Role::Assistant, "");
+        reply.parts = vec![Part::Text("Booting it.".into()), Part::Said("it shows a black screen".into()), Part::Text("Software rendering, then.".into())];
+        let turn = |role, text: &str| (role, text.to_string(), Vec::new());
+        assert_eq!(history(&[reply.clone()], None), vec![turn(Role::Assistant, "Booting it."), turn(Role::User, "it shows a black screen"), turn(Role::Assistant, "Software rendering, then.")]);
+        reply.incomplete = true;
+        assert_eq!(history(&[reply], None), vec![turn(Role::User, "it shows a black screen")]);
     }
 }

@@ -312,6 +312,8 @@ fn message(m: &store::Message) -> wire::Msg {
                     wire::Piece::Tool { id: t.id.clone(), kind: kind.into(), title, target: cut(&target, 300), ok: t.ok, summary: cut(&t.summary, 300), image }
                 }
                 Part::Notice(text) => wire::Piece::Notice { text: text.clone() },
+                // ponytail: the phone shows it as a notice line; give it a piece of its own if it should be a bubble there too.
+                Part::Said(text) => wire::Piece::Notice { text: format!("You: {}", bubble::without_file_notes(text).trim()) },
             })
             .collect()
     };
@@ -334,7 +336,7 @@ fn view(app: &App) -> wire::View {
     let skip = app.conv.messages.len().saturating_sub(app.remote.window.1.max(SHOWN));
     // "This reply stopped before it finished": the window offers Resume when anything of it arrived.
     let last = app.conv.messages.last().filter(|m| m.role == Role::Assistant && m.incomplete);
-    let resume = run.is_none() && last.is_some_and(|m| m.parts.iter().any(|part| !matches!(part, Part::Notice(_))));
+    let resume = run.is_none() && last.is_some_and(|m| m.parts.iter().any(|part| !matches!(part, Part::Notice(_) | Part::Said(_))));
     let row = |c: &store::ChatMeta| wire::ChatRow { id: c.id.clone(), title: c.title.clone(), updated: c.updated_at, running: app.runs.iter().any(|run| run.conv_id == c.id), archived: c.archived };
     let notice = match (&app.toast, &app.slash.notice) {
         (Some((text, at)), _) if at.elapsed() < TOAST => text.clone(),
