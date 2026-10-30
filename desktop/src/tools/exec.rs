@@ -258,7 +258,8 @@ static FORCE_PUSH: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| Rege
 /// What `shell` treats as taking the computer apart: a disk format, a boot/registry/account/protection change
 /// (bcdedit, diskpart, reg delete, …), or a delete naming a place outside the chat's folder, where a restore point
 /// (which brings back the chat's folder and nothing else) could not undo it, or a force push, which rewrites a
-/// remote for everyone. A match is refused in Auto, where nobody may be there to answer, and asked about in Manual and Critical.
+/// remote for everyone. A match runs unasked in Auto, which the user picked to run everything, and is shown for approval
+/// first in Manual and Critical.
 // ponytail: a reading of the text, there to catch a wreck made in passing. It is not a parser, and a script the
 // model writes to a file and runs was never held by it. Use PowerShell's own parser
 // (System.Management.Automation.Language) if this has to hold against a command written to get past it.
@@ -294,7 +295,7 @@ fn shell_wrecks(script: &str, root: &Path) -> Option<&'static str> {
 
 /// PowerShell on Windows: the one shell let through, for what only it can ask the system (event logs, services,
 /// installed programs, hardware). With "Ask me first" the user is shown its text whole. With commands running
-/// automatically it runs unasked, like any program; a `shell_wrecks` match is refused there and asked about in the other modes. The web has no such thing, because it runs on a server and not on the user's own computer.
+/// automatically it runs unasked, like any program, a `shell_wrecks` match too; the other modes ask about one first. The web has no such thing, because it runs on a server and not on the user's own computer.
 fn shell(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String> {
     let mut words = argv.into_iter().peekable();
     while let Some(flag) = words.peek().map(|word| word.to_ascii_lowercase()) {
@@ -315,12 +316,8 @@ fn shell(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String> 
     let Some(program) = find_program(&ctx.root, command) else { return Err(format!("`{command}` was not found on this machine.")) };
     let mut ask = ctx.settings.approval.asks_routine();
     // A command that takes the computer apart (bcdedit, diskpart, a disk format, a delete outside the folder, a force
-    // push): refused in Auto, shown for approval in Manual and Critical. Auto ran it unasked, while the prompt and the
-    // README said it was refused.
-    if let Some(why) = shell_wrecks(&script, &ctx.root) {
-        if ctx.settings.approval == crate::store::Approval::Auto {
-            return Err(why.into());
-        }
+    // push): Auto runs it unasked, as the user chose it to; Manual and Critical show it for approval first.
+    if shell_wrecks(&script, &ctx.root).is_some() && ctx.settings.approval != crate::store::Approval::Auto {
         ask = true;
     }
     let key = serde_json::to_string(&["powershell", script.as_str()]).unwrap_or_default();
@@ -357,7 +354,7 @@ fn bash_wrecks(script: &str, root: &Path) -> Option<&'static str> {
 
 /// bash/sh as a real shell, the counterpart of `shell`: the script is run with `bash -c`, so its pipes, redirects, `&&`
 /// and loops work. On Windows this needs git-bash's bash.exe on PATH. Asked for in "Ask me first"; while commands run
-/// automatically it runs unasked like any program; a `bash_wrecks` match is refused there and asked about in the other modes.
+/// automatically it runs unasked like any program, a `bash_wrecks` match too; the other modes ask about one first.
 fn bash_shell(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, String> {
     let mut words = argv.into_iter().peekable();
     // Drop the usual invocation flags; whatever remains is the script.
@@ -378,10 +375,7 @@ fn bash_shell(ctx: &Ctx, command: &str, argv: Vec<String>) -> Result<Launch, Str
         return Err(format!("`{command}` was not found on this machine.{}", if cfg!(windows) { " Install Git for Windows and make sure bash.exe is on PATH, or use powershell instead." } else { "" }));
     };
     let mut ask = ctx.settings.approval.asks_routine();
-    if let Some(why) = bash_wrecks(&script, &ctx.root) {
-        if ctx.settings.approval == crate::store::Approval::Auto {
-            return Err(why.into());
-        }
+    if bash_wrecks(&script, &ctx.root).is_some() && ctx.settings.approval != crate::store::Approval::Auto {
         ask = true;
     }
     let key = serde_json::to_string(&["bash", script.as_str()]).unwrap_or_default();
@@ -1607,11 +1601,11 @@ mod tests {
             assert!(prep(Approval::Manual, "powershell", &["Get-Process"]).ok().unwrap().ask && prep(Approval::Manual, "powershell", &[r"Remove-Item C:\x"]).ok().unwrap().ask);
             let change = prep(Approval::Auto, "powershell Remove-Item 'a b'", &[]).ok().unwrap();
             assert!(!change.ask && change.display == "powershell Remove-Item 'a b'");
-            // What cannot be undone is refused in Auto, where nobody may be there to answer; Critical asks.
-            assert!(prep(Approval::Auto, "powershell", &[r"Remove-Item C:\Users\x -Recurse"]).is_err());
-            assert!(prep(Approval::Auto, "powershell", &["bcdedit /set {current} nx AlwaysOff"]).is_err());
-            assert!(prep(Approval::Auto, "powershell", &["git push --force origin main"]).err().unwrap().contains("force push"));
-            assert!(prep(Approval::Auto, "powershell", &["git push -f"]).is_err() && prep(Approval::Critical, "powershell", &["git push origin main -f"]).ok().unwrap().ask);
+            // Auto runs even what cannot be undone, unasked: picking Auto was the user's yes. Critical shows it for approval.
+            assert!(!prep(Approval::Auto, "powershell", &[r"Remove-Item C:\Users\x -Recurse"]).ok().unwrap().ask);
+            assert!(!prep(Approval::Auto, "powershell", &["bcdedit /set {current} nx AlwaysOff"]).ok().unwrap().ask);
+            assert!(!prep(Approval::Auto, "powershell", &["git push --force origin main"]).ok().unwrap().ask);
+            assert!(prep(Approval::Critical, "powershell", &["git push origin main -f"]).ok().unwrap().ask);
             assert!(!prep(Approval::Auto, "powershell", &["git push origin main; git status"]).ok().unwrap().ask);
             assert!(prep(Approval::Critical, "powershell", &["bcdedit /set {current} nx AlwaysOff"]).ok().unwrap().ask);
             assert!(prep(Approval::Critical, "powershell", &[r"Remove-Item C:\Users\x -Recurse"]).ok().unwrap().ask);
