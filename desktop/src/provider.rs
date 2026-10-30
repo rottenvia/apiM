@@ -560,6 +560,8 @@ pub struct Round {
     pub served: Option<String>,
     /// Seconds to the first token, and from it to the end.
     pub timing: Option<(f64, f64)>,
+    /// Why Claude's safety check declined the request ("cyber", "reasoning_extraction"), when it did and said.
+    pub refusal: Option<String>,
 }
 
 pub enum Delta<'a> {
@@ -789,6 +791,9 @@ pub async fn stream(client: &reqwest::Client, target: &Target, body: &Value, cut
             }
             if let Some(name) = frame["provider"].as_str() {
                 round.served = Some(name.to_string());
+            }
+            if let Some(category) = frame["stop_details"]["category"].as_str() {
+                round.refusal = Some(category.to_string());
             }
             let choice = &frame["choices"][0];
             if let Some(reason) = choice["finish_reason"].as_str() {

@@ -6410,7 +6410,7 @@ Ask before you build the wrong thing. If a choice would change what you produce 
             if (due && !due.halt) {
               transcript.push({ role: "system", content: stepBudgetNudge(due) });
               recordAsync({
-                kind: "run_stopped",
+                kind: "run_checkpoint",
                 subject: "step budget checkpoint",
                 detail: `Step ${due.step.id}: ${due.rounds} rounds, ${due.minutes} min (checkpoint ${due.level}).`,
                 context: { rounds: toolRounds },
@@ -6685,7 +6685,8 @@ Ask before you build the wrong thing. If a choice would change what you produce 
           }
         };
 
-        if (thinkingEnabled && !reasoningContent) {
+        // Not for Claude: adaptive thinking may skip a think, and a summary can come back empty.
+        if (thinkingEnabled && !reasoningContent && !/^(anthropic\/|claude-)/.test(String(model))) {
           recordAsync({
             kind: "api_error",
             subject: "reasoning stream",

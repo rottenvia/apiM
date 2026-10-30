@@ -209,7 +209,7 @@ pub fn reports(app: &mut App, ui: &mut Ui) {
         ui.spacing_mut().item_spacing.x = 8.0;
         let plain = |label| Btn::outline(label).pad(12.0, 6.0).fill(p.bg3, p.bg3).border(p.border, p.border_light);
         if plain("Export as Markdown").enabled(total > 0).show(ui).clicked() {
-            if let Some(path) = rfd::FileDialog::new().set_file_name("apim-diagnostics.md").save_file() {
+            if let Some(path) = crate::diagnostics::modal(|| rfd::FileDialog::new().set_file_name("apim-diagnostics.md").save_file()) {
                 let _ = std::fs::write(path, crate::diagnostics::markdown());
             }
         }

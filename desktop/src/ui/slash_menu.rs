@@ -367,7 +367,7 @@ fn prompt(app: &mut App, ctx: &egui::Context, shown: String) {
 
 /// The system's own OK / Cancel box, as `window.confirm` is on the web.
 fn confirm(question: &str) -> bool {
-    let answer = rfd::MessageDialog::new().set_level(rfd::MessageLevel::Warning).set_title("apiM").set_description(question).set_buttons(rfd::MessageButtons::OkCancel).show();
+    let answer = crate::diagnostics::modal(|| rfd::MessageDialog::new().set_level(rfd::MessageLevel::Warning).set_title("apiM").set_description(question).set_buttons(rfd::MessageButtons::OkCancel).show());
     matches!(answer, rfd::MessageDialogResult::Ok | rfd::MessageDialogResult::Yes)
 }
 

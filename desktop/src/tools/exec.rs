@@ -387,6 +387,11 @@ fn argv_arg(args: &Value, key: &str) -> Result<Vec<String>, String> {
     if v.is_null() {
         return Ok(Vec::new());
     }
+    // One word is one argument however it is sent: `"args": "app/server.py"` was refused twice in one run (Sonnet 5.5).
+    // Words with spaces between them are not split: where one argument ends would be a guess.
+    if let Some(word) = v.as_str().filter(|s| !s.trim().is_empty() && !s.trim().contains(char::is_whitespace) && !s.contains('\0')) {
+        return Ok(vec![word.trim().to_string()]);
+    }
     let Some(items) = v.as_array() else { return Err("args must be a list of strings, not a single string.".into()) };
     items
         .iter()
@@ -1699,7 +1704,8 @@ mod tests {
 
     #[test]
     fn arguments_are_checked_like_the_web() {
-        assert_eq!(argv_arg(&json!({ "args": "app.py" }), "args").unwrap_err(), "args must be a list of strings, not a single string.");
+        assert_eq!(argv_arg(&json!({ "args": "app.py" }), "args").unwrap(), ["app.py"]);
+        assert_eq!(argv_arg(&json!({ "args": "-m pytest" }), "args").unwrap_err(), "args must be a list of strings, not a single string.");
         assert_eq!(argv_arg(&json!({ "args": [3] }), "args").unwrap_err(), "Every argument must be a string.");
         assert_eq!(argv_arg(&json!({ "args": ["a\u{0}b"] }), "args").unwrap_err(), "Arguments must not contain NUL bytes.");
         assert_eq!(argv_arg(&json!({}), "args").unwrap(), Vec::<String>::new());

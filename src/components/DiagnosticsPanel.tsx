@@ -28,6 +28,7 @@ const KIND_LABEL: Record<string, string> = {
   api_error: "API error",
   limit_hit: "Hit a limit",
   run_stopped: "Stopped early",
+  run_checkpoint: "Long step",
   ui_error: "Interface error",
 };
 

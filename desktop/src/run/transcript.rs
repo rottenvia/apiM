@@ -267,11 +267,15 @@ pub fn wire(messages: &[Value], thoughts: Thoughts) -> Vec<Value> {
         .map(|m| match m["role"].as_str() {
             Some("tool") => json!({ "role": "tool", "tool_call_id": m["tool_call_id"], "content": m["content"] }),
             Some("assistant") => {
+                // A think the app once handed back as the turn's own words (`stall::draft_carry`) is left out for Claude:
+                // it refuses every later request of a chat that holds one, a "hi" too.
+                let carried = thoughts == Thoughts::Gone && m["content"].as_str().is_some_and(|c| c.starts_with(super::stall::DRAFT_CARRY_MARK));
+                let content = if carried { json!("") } else { m["content"].clone() };
                 let Some(calls) = m["tool_calls"].as_array().filter(|calls| !calls.is_empty()) else {
-                    return json!({ "role": "assistant", "content": m["content"].as_str().unwrap_or("") });
+                    return json!({ "role": "assistant", "content": content.as_str().unwrap_or("") });
                 };
                 let calls: Vec<Value> = calls.iter().map(|c| json!({ "id": c["id"], "type": "function", "function": { "name": c["function"]["name"], "arguments": harden_args(c["function"]["arguments"].as_str().unwrap_or("")) } })).collect();
-                let mut out = json!({ "role": "assistant", "content": m["content"], "tool_calls": calls });
+                let mut out = json!({ "role": "assistant", "content": content, "tool_calls": calls });
                 let reasoning = m["reasoning_content"].as_str().unwrap_or("");
                 match thoughts {
                     Thoughts::FieldEnd(field) if !reasoning.trim().is_empty() => out[field] = json!(thought_end(reasoning)),
@@ -455,6 +459,10 @@ mod tests {
         assert!(gone.iter().all(|m| !m.to_string().contains(CARRIED_MARK) && m.get("reasoning").is_none() && m.get("reasoning_content").is_none()), "{gone:?}");
         assert_eq!(gone[2]["tool_calls"][0]["id"], "c1");
         assert_eq!((gone[2]["content"].clone(), gone[4]["content"].clone()), (Value::Null, json!("Narration.")));
+        // A think carried in the words by an older run is left out for Claude, and kept for the others.
+        let carried = [json!({ "role": "assistant", "content": crate::run::stall::draft_carry("the plan", None) })];
+        assert_eq!(wire(&carried, Thoughts::Gone)[0]["content"], "");
+        assert_eq!(wire(&carried, Thoughts::Text)[0]["content"], carried[0]["content"]);
     }
 
     #[test]

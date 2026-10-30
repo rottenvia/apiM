@@ -103,13 +103,16 @@ pub fn cause(kind: &str, subject: &str, detail: &str) -> Cause {
     let has = |words: &[&str]| words.iter().any(|word| text.contains(word));
     let starts = |words: &[&str]| words.iter().any(|word| text.starts_with(word));
     match kind {
-        "ui_error" | "ui_freeze" | "text_held" | "tool_hung" | "tool_abandoned" => Cause::App,
-        "tool_slow" => Cause::Setup,
-        "api_error" | "endpoint_moved" => Cause::Provider,
+        "ui_error" | "ui_freeze" | "tool_hung" => Cause::App,
+        // Not faults: a long build that finished, a reply the user stopped, text the typing pace held on purpose, and
+        // OpenRouter answering from another of its endpoints. Kept in the log, left out of the report.
+        "tool_slow" | "tool_abandoned" | "text_held" | "endpoint_moved" => Cause::Routine,
+        "api_error" | "refusal" => Cause::Provider,
         "run_stopped" if subject == "spending limit" => Cause::Routine,
-        "unverified_claim" | "limit_hit" | "browser_blocked" | "run_stopped" | "run_checkpoint" => Cause::Model,
-        // A command that ran and failed has given its answer: that is the work, not a fault in it.
-        _ if starts(&["failed: ", "exit ", "sandbox exit", "timed out: ", "skipped"]) || has(&["declined", "no answer", "skipped the question"]) => Cause::Routine,
+        "unverified_claim" | "limit_hit" | "browser_blocked" | "run_stopped" | "run_continued" | "run_checkpoint" => Cause::Model,
+        // A command that ran and failed has given its answer: that is the work, not a fault in it. A wait that ran
+        // out and an approval nobody gave are answers too.
+        _ if starts(&["failed: ", "exit ", "sandbox exit", "timed out: ", "timed out waiting", "skipped"]) || has(&["declined", "no answer", "skipped the question", "did not respond to the approval"]) => Cause::Routine,
         _ if has(&["background is not available", "not implemented", "not supported yet", "internal error", "panicked", "ebusy", "resource busy"]) => Cause::App,
         _ if has(&["cut off mid-call"]) => Cause::Provider,
         // A name the model asked for may hold any word ("No run_in_sandbox in x.cpp"): read by how the line opens.
@@ -194,7 +197,23 @@ pub fn record_with(kind: &str, subject: &str, detail: &str, context: Value) {
 /// slow, not as a fault.
 const HUNG_AFTER: std::time::Duration = std::time::Duration::from_secs(90);
 
-/// One tool call, watched. A call still running after `HUNG_AFTER` is written down while it runs, one that ends late is
+/// Milliseconds the window's thread has spent in a native dialog since the frame check last took them.
+static MODAL_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Runs a native dialog (open, save, a question) that holds the window's thread: the time the user spends in it is
+/// theirs, and the frozen-frame check leaves it out (`take_modal_ms`). A save dialog was filed as a 2 s freeze.
+pub fn modal<T>(dialog: impl FnOnce() -> T) -> T {
+    let started = std::time::Instant::now();
+    let out = dialog();
+    MODAL_MS.fetch_add(started.elapsed().as_millis() as u64, std::sync::atomic::Ordering::Relaxed);
+    out
+}
+
+pub fn take_modal_ms() -> u64 {
+    MODAL_MS.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// One tool call, watched. A call still running past its own limit (`overdue`) is written down while it runs, one that ends late is
 /// written down as slow, and one dropped unfinished (the reply was stopped while it ran) is written down with how long
 /// it had run. A browse that never came back ("Opening", 2026-10-28) left nothing behind: the chat was not saved
 /// and no tool had failed.
@@ -207,14 +226,27 @@ pub struct Watch {
     timer: Option<tokio::task::JoinHandle<()>>,
 }
 
+/// When a call has outlived what it may take: its own time limit (`timeout_ms`, or run_command's five minutes for an
+/// install) with an approval prompt's five minutes on top for a command. None where waiting is the call: a question to
+/// the user, a wait on a process. A fixed 90 s filed every long build, chosen sleep and unanswered question as a hang.
+fn overdue(tool: &str, args: &Value) -> Option<std::time::Duration> {
+    use std::time::Duration;
+    let asked = args["timeout_ms"].as_u64().or_else(|| args["timeout_ms"].as_str()?.parse().ok()).map(|ms| Duration::from_millis(ms.min(600_000)));
+    match tool {
+        "ask_user" | "wait_for_output" => None,
+        "run_command" => Some(asked.unwrap_or(Duration::from_secs(300)) + Duration::from_secs(5 * 60 + 30)),
+        _ => Some(asked.map_or(HUNG_AFTER, |own| own.max(HUNG_AFTER) + Duration::from_secs(30))),
+    }
+}
+
 impl Watch {
     pub fn start(tool: &str, args: &Value, model: &str) -> Watch {
         let (name, gist, by) = (tool.to_string(), gist(tool, args), model.to_string());
-        let timer = tokio::runtime::Handle::try_current().ok().map(|rt| {
+        let timer = overdue(tool, args).zip(tokio::runtime::Handle::try_current().ok()).map(|(after, rt)| {
             let (name, gist, by) = (name.clone(), gist.clone(), by.clone());
             rt.spawn(async move {
-                tokio::time::sleep(HUNG_AFTER).await;
-                record_with("tool_hung", &name, &format!("still running after {} s: {gist}", HUNG_AFTER.as_secs()), serde_json::json!({ "model": by }));
+                tokio::time::sleep(after).await;
+                record_with("tool_hung", &name, &format!("still running after {} s, past its own time limit: {gist}", after.as_secs()), serde_json::json!({ "model": by }));
             })
         });
         Watch { tool: name, gist, model: by, started: std::time::Instant::now(), finished: false, timer }
@@ -262,7 +294,11 @@ pub fn watch_for_crashes() {
     std::panic::set_hook(Box::new(move |info| {
         let at = info.location().map_or(String::new(), |l| format!("{}:{}", l.file().replace('\\', "/"), l.line()));
         let said = info.payload().downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| info.payload().downcast_ref::<String>().cloned()).unwrap_or_default();
-        record("ui_error", &at, &format!("Crashed: {said}"));
+        // Terminal mode printing to a pipe whose reader has gone (os error 232): nobody is left to read it, and the
+        // window never prints. Filed as the app's crash, it read as one.
+        if !said.starts_with("failed printing to std") {
+            record("ui_error", &at, &format!("Crashed: {said}"));
+        }
         usual(info);
     }));
 }
@@ -376,6 +412,8 @@ pub fn kind_label(kind: &str) -> &str {
         "tool_hung" => "Tool still running",
         "tool_abandoned" => "Stopped mid-tool",
         "tool_slow" => "Slow tool",
+        "refusal" => "Declined by Claude's safety check",
+        "run_continued" => "Stopped mid-task, continued",
         other => other,
     }
 }
@@ -410,7 +448,7 @@ pub fn render_report(entries: &[Diagnostic]) -> String {
     let sections = [
         (Cause::App, "Likely app bugs", "A crash, a frame that froze the window, or something the app itself could not do. Start here."),
         (Cause::Setup, "This PC", "Something the machine lacks or blocks: the sandbox, a program that is not installed, a site that did not answer."),
-        (Cause::Provider, "Provider", "The model's API misbehaved: an error status, a reply cut short, thinking that never arrived."),
+        (Cause::Provider, "Provider", "The model's API: an error status, a reply cut short, thinking that never arrived, a request its safety check refused."),
         (Cause::Model, "Model habits", "The model's own slips, listed only because each happened at least three times in the same way. A slip that repeats usually means a tool's description or its error message misleads the model."),
     ];
     for (cause, title, meaning) in sections {
@@ -499,6 +537,27 @@ mod tests {
         assert!(text.contains("4 more events were left out as ordinary") && !text.contains("declined") && !text.contains("No such file") && !text.contains("tests failed"));
         assert!(render_report(&[]).ends_with("Nothing recorded. Either everything has worked, or nothing has been run since the log was last cleared.\n"));
         assert_eq!((kind_label("run_stopped"), kind_label("ui_freeze"), kind_label("mystery")), ("Stopped early", "Window froze", "mystery"));
+    }
+
+    #[test]
+    fn waits_and_stops_are_not_faults() {
+        // A long build that finished, a reply the user stopped, a wait that ran out, an approval nobody gave: kept, not reported.
+        for (kind, detail) in [
+            ("tool_slow", "took 200 s (finished): cargo build"),
+            ("tool_abandoned", "the reply was stopped 20 s into it: python -m http.server"),
+            ("text_held", "Text waited 3.1 s to be shown."),
+            ("endpoint_moved", "Round 3 was answered by B, the round before by A."),
+            ("tool_failed", "Timed out waiting"),
+            ("tool_failed", "The user did not respond to the approval prompt within 5 minutes."),
+        ] {
+            assert_eq!(cause(kind, "x", detail), Cause::Routine, "{kind}: {detail}");
+        }
+        assert_eq!(cause("refusal", "cyber", "claude-opus-5-5 declined round 2 (cyber)"), Cause::Provider);
+        // A call is overdue past its own limit, and never where the wait is the call.
+        let secs = |tool: &str, args: Value| overdue(tool, &args).map(|d| d.as_secs());
+        assert_eq!((secs("ask_user", serde_json::json!({})), secs("wait_for_output", serde_json::json!({ "timeout_ms": 1000 }))), (None, None));
+        assert_eq!((secs("run_command", serde_json::json!({ "timeout_ms": 600_000 })), secs("run_command", serde_json::json!({}))), (Some(930), Some(630)));
+        assert_eq!((secs("browse", serde_json::json!({})), secs("fetch_url", serde_json::json!({ "timeout_ms": "200000" }))), (Some(90), Some(230)));
     }
 
     /// The report for a real log: `APIM_DATA_DIR=<data> cargo test real_report -- --ignored --nocapture`.
