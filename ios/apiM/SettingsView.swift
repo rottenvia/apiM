@@ -27,6 +27,9 @@ struct SettingsView: View {
                 }
                 phone
                 connection
+                if remote.pairing != nil {
+                    protection
+                }
                 Section {
                 } footer: {
                     Text("apiM \(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "") (\(Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""))")
@@ -254,6 +257,32 @@ struct SettingsView: View {
             Button("Unpair this phone", role: .destructive) { unpairing = true }
         } footer: {
             Text("Messages and approvals travel straight to apiM on your computer, encrypted with the key in the code you scanned. Nothing goes through a server.")
+        }
+        .listRowBackground(Palette.surface)
+    }
+
+    @ViewBuilder
+    private var protection: some View {
+        Section {
+            Toggle(isOn: Binding(get: { remote.pcLocked }, set: { Haptics.pick(); remote.lockPC($0) })) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Lock \(remote.name)")
+                    Text("Keeps apiM alive: if anything closes it, the guardian brings it back. Turn off to let it close.")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Palette.text2)
+                }
+            }
+            .tint(Palette.accent)
+            Button {
+                Haptics.pick()
+                remote.wakePC()
+            } label: {
+                Label("Open apiM on \(remote.name)", systemImage: "play.circle")
+            }
+        } header: {
+            Text("Protection")
+        } footer: {
+            Text("Needs the guardian installed on the computer (apiM › Settings › Phone › Protection). The lock is set only from here; while it is on, apiM cannot be closed on the computer.")
         }
         .listRowBackground(Palette.surface)
     }

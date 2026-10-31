@@ -41,6 +41,9 @@ final class Remote {
     private(set) var fetchingEarlier = false
     /// The computer's latest notice (a message that was not sent says why), shown as a banner until dismissed.
     var banner: String?
+    /// The phone-lock toggle's position. Set from here; the guardian does not report it back, so it starts off each
+    /// launch and shows the last thing this phone sent.
+    var pcLocked = false
 
     @ObservationIgnored private var connection: NWConnection?
     @ObservationIgnored private var generation = 0
@@ -532,6 +535,93 @@ final class Remote {
 
     private func write(_ payload: Data) {
         connection?.send(content: Frames.encode(payload), completion: .contentProcessed { _ in })
+    }
+
+    // MARK: the guardian
+
+    /// Short-lived connections to the guardian (apiM's port + 1), held while they run so they are not freed mid-send.
+    @ObservationIgnored private var guardianLinks: [ObjectIdentifier: NWConnection] = [:]
+
+    /// Launches apiM on the computer if it is closed. Reaches the guardian, which is up even when apiM is not.
+    func wakePC() {
+        guardianSend(["t": "wake"])
+    }
+
+    /// Turns the phone lock on or off. While on, the guardian relaunches apiM whenever anything kills it.
+    func lockPC(_ on: Bool) {
+        pcLocked = on
+        guardianSend(["t": "lock", "on": on])
+    }
+
+    /// Opens a one-shot connection to the guardian, does the same hello handshake as the main link, sends a sealed
+    /// ping (which the handshake consumes) and then the command, and closes. Tries each paired address in turn.
+    private func guardianSend(_ object: [String: Any]) {
+        guard let pairing, let payload = try? JSONSerialization.data(withJSONObject: object) else { return }
+        guardianAttempt(host: 0, pairing: pairing, payload: payload)
+    }
+
+    private func guardianAttempt(host index: Int, pairing: Pairing, payload: Data) {
+        guard index < pairing.hosts.count, let port = NWEndpoint.Port(rawValue: pairing.port &+ 1) else { return }
+        let tcp = NWProtocolTCP.Options()
+        tcp.connectionTimeout = 5
+        tcp.noDelay = true
+        let connection = NWConnection(host: NWEndpoint.Host(pairing.hosts[index]), port: port, using: NWParameters(tls: nil, tcp: tcp))
+        let id = ObjectIdentifier(connection)
+        guardianLinks[id] = connection
+        let mine = Data.random(16)
+        var buffer = Data()
+        var done = false
+
+        func finish(_ ok: Bool) {
+            guard !done else { return }
+            done = true
+            connection.cancel()
+            self.guardianLinks[id] = nil
+            if !ok {
+                self.guardianAttempt(host: index + 1, pairing: pairing, payload: payload)
+            }
+        }
+        func receive() {
+            connection.receive(minimumIncompleteLength: 1, maximumLength: 1 << 16) { data, _, complete, error in
+                if let data, !data.isEmpty {
+                    buffer.append(data)
+                    if let frames = Frames.take(from: &buffer), let hello = frames.first,
+                       let object = try? JSONSerialization.jsonObject(with: hello) as? [String: Any],
+                       let nonce = object["nonce"] as? String, let theirs = Data(base64URL: nonce), theirs.count == 16 {
+                        var sealer = Sealer(secret: pairing.secret, phone: mine, pc: theirs)
+                        if let ping = try? sealer.seal(Data("{\"t\":\"ping\"}".utf8)), let command = try? sealer.seal(payload) {
+                            connection.send(content: Frames.encode(ping) + Frames.encode(command), completion: .contentProcessed { _ in
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { finish(true) }
+                            })
+                        } else {
+                            finish(false)
+                        }
+                        return
+                    }
+                }
+                if complete || error != nil {
+                    finish(false)
+                    return
+                }
+                receive()
+            }
+        }
+        connection.stateUpdateHandler = { state in
+            switch state {
+            case .ready:
+                let hello: [String: Any] = ["v": 1, "nonce": mine.base64URL, "name": UIDevice.current.name]
+                let data = (try? JSONSerialization.data(withJSONObject: hello)) ?? Data()
+                connection.send(content: Frames.encode(data), completion: .contentProcessed { _ in })
+                receive()
+            case .failed, .waiting:
+                finish(false)
+            default:
+                break
+            }
+        }
+        // Never let a stuck connection hold on: it also retains this model until it is let go.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { finish(false) }
+        connection.start(queue: .main)
     }
 
     private func lost(_ reason: String) {
