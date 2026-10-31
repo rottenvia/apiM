@@ -62,7 +62,42 @@ fn icon() -> egui::IconData {
     egui::IconData { width: picture.width(), height: picture.height(), rgba: picture.into_raw() }
 }
 
+/// Gives apiM's process and its UI thread a little more of the processor, so the window stays smooth when the rest
+/// of the machine is under load. Above-normal, never high: it must keep a window's edge in the scheduler without
+/// starving the system it shares (high class can lock out input and services). The UI loop runs on this thread, so
+/// the thread bump lands on the one that draws.
+#[cfg(windows)]
+fn boost_priority() {
+    use windows_sys::Win32::System::Threading::{ABOVE_NORMAL_PRIORITY_CLASS, GetCurrentProcess, GetCurrentThread, SetPriorityClass, SetThreadPriority, THREAD_PRIORITY_ABOVE_NORMAL};
+    // SAFETY: the handles are process-wide pseudo-handles (need no close) and the calls touch no memory of ours.
+    unsafe {
+        SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+    }
+}
+#[cfg(not(windows))]
+fn boost_priority() {}
+
+/// Flashes the taskbar and plays a notification sound: a page in the Browser pane is a check for a person and is
+/// now waiting for the user (`browser::live::take_check_alert`). The window may be minimized or behind something,
+/// so the in-pane "Your turn" chip alone is not enough to be noticed.
+fn alert_check(ctx: &egui::Context) {
+    ctx.send_viewport_cmd(egui::ViewportCommand::RequestUserAttention(egui::UserAttentionType::Critical));
+    #[cfg(windows)]
+    {
+        #[link(name = "user32")]
+        unsafe extern "system" {
+            fn MessageBeep(kind: u32) -> i32;
+        }
+        // MB_ICONASTERISK: the system notification sound, played asynchronously. SAFETY: takes a constant, no memory.
+        unsafe {
+            MessageBeep(0x40);
+        }
+    }
+}
+
 pub fn run(rt: tokio::runtime::Runtime) -> eframe::Result {
+    boost_priority();
     let shot = Shot::from_env();
     let mut viewport = egui::ViewportBuilder::default().with_title("apiM").with_inner_size([1280.0, 800.0]).with_min_inner_size([420.0, 420.0]).with_drag_and_drop(true);
     // No system frame: `titlebar` draws the bar and the window buttons in the app's own colours.
@@ -2252,6 +2287,9 @@ impl eframe::App for App {
         }
         self.take_drops(&ctx);
         self.take_paste(&ctx);
+        if crate::browser::live::take_check_alert() {
+            alert_check(&ctx);
+        }
         // Nothing is opened by a key while the loading screen still covers what it would open over.
         if !self.boot.as_ref().is_some_and(|boot| boot.loading()) {
             self.shortcuts(&ctx);

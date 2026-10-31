@@ -101,6 +101,10 @@ static STREAMED: StdMutex<Option<String>> = StdMutex::new(None);
 static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 static RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
 static REAL: AtomicBool = AtomicBool::new(false);
+/// Raised once each time a page is handed to the user for a check (`hand_over`), so the window can alert the user —
+/// flash the taskbar and play a sound — even when the Browser pane is not on screen. The window takes it with
+/// `take_check_alert`.
+static CHECK_ALERT: AtomicBool = AtomicBool::new(false);
 
 /// The window makes the pages: real views in the pane (`ui::webview`), not a headless browser's. Said once, at start.
 pub fn use_views() {
@@ -418,7 +422,13 @@ async fn hand_over(key: String) {
     page.detach().await;
     let root = page.root().unwrap_or_else(|| PathBuf::from(&key));
     with_key(&key, |v| (v.handed, v.reload, v.loading, v.pointer) = (Some((page.target().to_string(), root)), true, false, None));
+    CHECK_ALERT.store(true, Ordering::Relaxed);
     wake();
+}
+
+/// True once after a check was handed to the user: the window alerts them and clears it.
+pub fn take_check_alert() -> bool {
+    CHECK_ALERT.swap(false, Ordering::Relaxed)
 }
 
 /// The page on show is a check for a person and nobody is driving it: it goes to the user (`hand_over`).
