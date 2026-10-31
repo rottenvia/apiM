@@ -426,6 +426,8 @@ fn act(world: &Arc<Mutex<World>>, command: Command) {
             }
         }
         Command::More => w.window += SHOWN,
+        // Guardian concerns (the real guardian service answers these on its own port); the mock has nothing to do.
+        Command::Wake | Command::Lock { .. } => {}
     }
 }
 
