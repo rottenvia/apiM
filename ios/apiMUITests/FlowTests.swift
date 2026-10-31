@@ -73,7 +73,7 @@ final class FlowTests: XCTestCase {
         }
     }
 
-    private func see(_ app: XCUIApplication, _ fragment: String, timeout: TimeInterval = 20, file: StaticString = #filePath, line: UInt = #line) {
+    private func see(_ app: XCUIApplication, _ fragment: String, timeout: TimeInterval = 30, file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertTrue(text(app, fragment).waitForExistence(timeout: timeout), "never saw \u{201c}\(fragment)\u{201d}", file: file, line: line)
     }
 
@@ -81,7 +81,9 @@ final class FlowTests: XCTestCase {
     /// approval card sat out of sight under the box.
     private func inView(_ app: XCUIApplication, _ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
         let box = self.element(app, "composer")
-        let deadline = Date().addingTimeInterval(4)
+        // The chat auto-scrolls the newest content above the composer; on the slow dark screenshot run (the whole
+        // suite re-run without building) that settle can take several seconds, so wait well past it.
+        let deadline = Date().addingTimeInterval(12)
         while Date() < deadline {
             if element.exists, element.frame.minY > 80, element.frame.maxY <= box.frame.minY {
                 return
