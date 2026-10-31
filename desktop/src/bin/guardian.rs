@@ -92,6 +92,14 @@ mod imp {
             .args(["/inheritance:r", "/grant:r", "SYSTEM:(OI)(CI)F", "Administrators:(OI)(CI)F", "Users:(OI)(CI)R"])
             .status();
 
+        // Open the guardian's port through Windows Firewall: a service gets no interactive allow prompt, so without
+        // this the phone cannot reach it even while it is running. Private and domain networks only, as apiM's own
+        // port is allowed; set the Wi-Fi to Private if the phone still cannot reach it.
+        let _ = std::process::Command::new("netsh").args(["advfirewall", "firewall", "delete", "rule", "name=apiM Guardian"]).status();
+        let _ = std::process::Command::new("netsh")
+            .args(["advfirewall", "firewall", "add", "rule", "name=apiM Guardian", "dir=in", "action=allow", "protocol=TCP", &format!("localport={}", guard::guardian_port(user_port)), "profile=private,domain"])
+            .status();
+
         let exe = std::env::current_exe().expect("the guardian knows its own path");
         let manager = match ServiceManager::local_computer(None::<&OsStr>, ServiceManagerAccess::CONNECT | ServiceManagerAccess::CREATE_SERVICE) {
             Ok(m) => m,
@@ -152,6 +160,7 @@ mod imp {
             }
         };
         let _ = service.stop();
+        let _ = std::process::Command::new("netsh").args(["advfirewall", "firewall", "delete", "rule", "name=apiM Guardian"]).status();
         // Give the stop a moment before deleting, or the service lingers as "marked for deletion".
         std::thread::sleep(Duration::from_millis(500));
         match service.delete() {
