@@ -393,6 +393,9 @@ pub fn code_draft_nudge_text(lines: usize) -> String {
     format!("{CODE_DRAFT_NUDGE_MARKER}\nYour last round drafted about {lines} lines of code inside your reasoning before writing anything. That code is paid for twice — once as thought, once again as the write_file argument — and delays every action. Decide the structure in a few sentences, then put the code DIRECTLY into write_file/edit_file: the file is the draft. Run it, and fix what fails with edit_file.")
 }
 
+/// How a think handed back as the model's own words opens (`draft_carry`).
+pub const DRAFT_CARRY_MARK: &str = "[My reasoning so far, verbatim";
+
 /// The think handed back as the model's own words: newest text kept under the cap, and a fence the cut landed inside closed and marked.
 pub fn draft_carry(reasoning: &str, why: Option<&str>) -> String {
     let mut text = reasoning.trim_end();
@@ -409,7 +412,7 @@ pub fn draft_carry(reasoning: &str, why: Option<&str>) -> String {
     }
     let open = text.split('\n').filter(|line| is_fence(line)).count() % 2 == 1;
     let omitted = if dropped > 0 { format!("(…{dropped} earlier chars omitted)\n") } else { String::new() };
-    format!("[My reasoning so far, verbatim — {}:]\n{omitted}{text}{}", why.unwrap_or("stopped so I write the code to files instead"), if open { "\n```  (my draft was cut off here — finish it in the file)" } else { "" })
+    format!("{DRAFT_CARRY_MARK} — {}:]\n{omitted}{text}{}", why.unwrap_or("stopped so I write the code to files instead"), if open { "\n```  (my draft was cut off here — finish it in the file)" } else { "" })
 }
 
 /// The instruction that follows a think cut over for drafting a whole program.

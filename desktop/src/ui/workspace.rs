@@ -159,7 +159,7 @@ fn reveal(path: &std::path::Path) {
 
 /// The browser's `window.confirm`: a native OK / Cancel box that holds the window until it is answered.
 pub fn confirm(text: &str) -> bool {
-    rfd::MessageDialog::new().set_title("apiM").set_description(text).set_buttons(rfd::MessageButtons::OkCancel).show() == rfd::MessageDialogResult::Ok
+    crate::diagnostics::modal(|| rfd::MessageDialog::new().set_title("apiM").set_description(text).set_buttons(rfd::MessageButtons::OkCancel).show()) == rfd::MessageDialogResult::Ok
 }
 
 /// JavaScript's `toFixed(1)`: a tie rounds up, where Rust's own formatting rounds to even.
@@ -563,7 +563,7 @@ fn restore(app: &mut App, id: &str, taken: &str) {
 // ponytail: zipped on the window's own thread, so a huge workspace holds the window for a moment. Move it to a thread if that shows.
 fn download(app: &mut App) {
     let Ok((name, bytes)) = snapshots::zip_workspace(&app.conv.workspace()) else { return };
-    if let Some(path) = rfd::FileDialog::new().set_file_name(name).add_filter("Zip archive", &["zip"]).save_file() {
+    if let Some(path) = crate::diagnostics::modal(|| rfd::FileDialog::new().set_file_name(name).add_filter("Zip archive", &["zip"]).save_file()) {
         let _ = std::fs::write(path, bytes);
     }
 }

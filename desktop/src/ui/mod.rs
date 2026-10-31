@@ -965,7 +965,7 @@ impl App {
     fn export_chat(&mut self, id: &str, format: &str) {
         let conv = if self.conv.id == id { Some(self.conv.clone()) } else { self.parked(id).cloned().or_else(|| Conversation::load(id)) };
         let Some(conv) = conv else { return };
-        let Some(path) = rfd::FileDialog::new().set_file_name(export::filename(&conv.title, format)).save_file() else { return };
+        let Some(path) = crate::diagnostics::modal(|| rfd::FileDialog::new().set_file_name(export::filename(&conv.title, format)).save_file()) else { return };
         match std::fs::write(&path, export::render(&conv, format)) {
             Ok(()) => self.side.note = Some((format!("Saved {}", path.file_name().unwrap_or_default().to_string_lossy()), Instant::now())),
             Err(e) => self.toast(format!("Could not save the file: {e}")),
@@ -974,7 +974,7 @@ impl App {
 
     /// Imports the chats in the picked files, worded as the web's "Import chats" does.
     fn import_chats(&mut self) {
-        let Some(paths) = rfd::FileDialog::new().add_filter("apiM chat export", &["json"]).pick_files() else { return };
+        let Some(paths) = crate::diagnostics::modal(|| rfd::FileDialog::new().add_filter("apiM chat export", &["json"]).pick_files()) else { return };
         let (mut imported, mut errors, mut not_json) = (0, Vec::new(), 0);
         for path in &paths {
             let Some(raw) = std::fs::read(path).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()) else {
@@ -1845,13 +1845,13 @@ impl App {
     // ------------------------------------------------------------ attaching
 
     fn pick_files(&mut self) {
-        if let Some(picked) = rfd::FileDialog::new().pick_files() {
+        if let Some(picked) = crate::diagnostics::modal(|| rfd::FileDialog::new().pick_files()) {
             picked.into_iter().for_each(|p| attachments::add(self, p));
         }
     }
 
     fn pick_folder(&mut self) {
-        if let Some(folder) = rfd::FileDialog::new().pick_folder() {
+        if let Some(folder) = crate::diagnostics::modal(|| rfd::FileDialog::new().pick_folder()) {
             attachments::add(self, folder);
         }
     }
@@ -2360,7 +2360,8 @@ impl eframe::App for App {
         selection::round(&ctx);
         self.take_shot(&ctx);
         // `APIM_PERF=4`: every frame that took the app longer than that many milliseconds to draw, on stderr.
-        let took = frame_started.elapsed().as_secs_f64() * 1000.0;
+        // Time in a native dialog (`diagnostics::modal`) is the user's, not the frame's.
+        let took = frame_started.elapsed().as_secs_f64() * 1000.0 - crate::diagnostics::take_modal_ms() as f64;
         if PERF.is_some_and(|limit| took > limit) {
             eprintln!("frame {took:.1} ms");
         }
@@ -2368,7 +2369,9 @@ impl eframe::App for App {
         // seconds (fonts, the first chat), not a self-portrait, and at most one a minute: one cause, one line.
         static BORN: std::sync::LazyLock<Instant> = std::sync::LazyLock::new(Instant::now);
         static TOLD: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
-        if took > 250.0 && self.shot.is_none() && BORN.elapsed() > Duration::from_secs(5) && TOLD.lock().unwrap().is_none_or(|at| at.elapsed() > Duration::from_secs(60)) {
+        // Read every frame, so the five seconds count from the first frame and not from the first slow one.
+        let settled = BORN.elapsed() > Duration::from_secs(5);
+        if took > 250.0 && self.shot.is_none() && settled &&TOLD.lock().unwrap().is_none_or(|at| at.elapsed() > Duration::from_secs(60)) {
             *TOLD.lock().unwrap() = Some(Instant::now());
             let doing = if self.opening.is_some() {
                 "opening a chat"

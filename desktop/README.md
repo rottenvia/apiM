@@ -238,6 +238,51 @@ Terminal mode takes any model id now (`--model claude-opus-5-5`, `--model openai
 the list is checked and added exactly as the model menu adds it, so the benchmark runs on a Claude key with
 `ANTHROPIC_API_KEY` set and nothing to configure first.
 
+## Claude, a second time: every model, and the refusal that ended a chat
+
+Run on 2026-10-30 on Anthropic's own API: a ping on ten Claude models (Opus 5.5, 5 and 4.8, Sonnet 5.5, 5 and 4.6,
+Haiku 5.5 and 4.5, Fable 5.1 and 5), the 14 tasks on Opus 5.5, Sonnet 5.5 and Fable 5.1, the 34 on Haiku 5.5, and
+probes of the API itself. Found:
+
+- **One carried thought, and the chat was over.** Where a think drafts a whole program, or the stream drops mid-think,
+  the loop hands the thought back as the model's own words ("[My reasoning so far, verbatim …]"). On Claude that turn
+  is refused (`stop_reason` "refusal", `reasoning_extraction`), and as it stays in the chat every later request is
+  refused with it, a plain "hi" too: measured on Opus 5.5. Claude gets neither cutover now, and such a turn already in
+  a chat is left out of what Claude is sent, so the chat goes on.
+- **A refusal said nothing.** The category Claude gives (`stop_details`) was not read: the reply ended empty, the
+  revive asked again with the same chat (refused again, paid again), and the problem log had no line for it. Each
+  refusal is said now, with its kind, written down under Provider, and not asked again. Requests opt into Anthropic's
+  fallback (`fallbacks: "default"`): a cyber or bio false alarm, likely on reverse-engineering work, is answered by the
+  model Anthropic names for it, costed at that model's prices and said in the chat. All ten models take the field.
+- **The rules written again for every new chat.** The rules' cache mark had moved to the end of the everyday tools, so
+  a chat in a new folder read only the tools: 7,551 of 14,967 tokens from the cache, the rest written at the hour's
+  double price. Both keep a mark now (the whole-request mark gives way when five would be set): 14,738 of 14,968.
+  Over the tasks, the share read from the cache went from 75% to 83% on Opus 5.5, 74% to 82% on Sonnet 5.5 and
+  80% to 89% on Haiku 5.5; Opus cost 10% less and Sonnet 14% less, all tasks passing before and after. Haiku passed
+  33 of 34 both times and cost more ($0.70 to $0.81), in 238 rounds against 199: about the same a round.
+- **Fable 5.1 against the task caps.** Six of its 14 tasks stopped at their spending caps, which were set for cheaper
+  models. Run again with $2 a task, five of the six passed (13 of 14 in all, html-table-extract among them, which every
+  other model fails); the one left, honest-blocked, lost a point on its own wording.
+- **A paid round thrown away at the spending limit.** The limit was asked again before a round's tools ran, against
+  what the next request might cost: Fable 5.1 wrote a whole test file in one round ($0.73), and the call was dropped
+  from the chat unrun, so Resume would have paid for it again. Only a `delegate` call, which spends the limit itself,
+  is held back now; the rest run, and the limit stops the next request.
+- **`args` as one word.** `"args": "app/server.py"` was refused as "not a list" twice in one Sonnet 5.5 run. One word is
+  one argument; words with spaces between them are still refused, where splitting would be a guess.
+
+What was checked and is not a fault: changing `effort` or the thinking fields between requests keeps the cache on
+Opus 5.5 and Haiku 5.5 (29,186 of 29,186 tokens read after each change); the cache within a reply reads all but the
+newest round (90.6% over 21 rounds); per-message effort works on the 5.5 models, Fable 5.1 and Opus 5, and is a 400
+on Sonnet 5 and Opus 4.8.
+
+The problem log was checked against what it reported, and six kinds were false alarms: "Tool still running" fired at
+90 s for a chosen sleep, a long build, a question to the user or an approval card, and "Slow tool" counted each such
+call again (a call is overdue now only past its own time limit, never while it waits by design, and slow, stopped and
+held-back text are kept out of the report); a wait that timed out and an approval nobody gave were filed as the PC's
+fault; "reasoning stream" fired for Claude, whose adaptive thinking may skip a think; terminal mode printing to a
+closed pipe was filed as a crash; and the time the user spent in a save or open dialog was filed as a frozen window.
+An auto-continued stop is its own kind now ("Stopped mid-task, continued"), not "Run stopped early".
+
 ## A long reply that stopped
 
 Found in one real reply: 160 rounds of work in a sandbox, 48 minutes, $0.27, stopped with two of six plan steps done and no visible way on.

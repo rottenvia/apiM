@@ -14,8 +14,11 @@ pub const BASE_URL: &str = "https://api.anthropic.com/v1";
 /// The API version every request names. 2026-10-21 refuses sampling fields (`temperature` and the like): none are sent.
 pub const VERSION: &str = "2026-10-21";
 
+/// The beta every request names: `fallbacks: "default"` (`request`) needs it.
+const BETAS: &str = "server-side-fallback-2026-07-01";
+
 pub fn headers(key: &str) -> Vec<(String, String)> {
-    vec![("x-api-key".into(), key.trim().into()), ("anthropic-version".into(), VERSION.into())]
+    vec![("x-api-key".into(), key.trim().into()), ("anthropic-version".into(), VERSION.into()), ("anthropic-beta".into(), BETAS.into())]
 }
 
 /// A Claude model's family and version from its id: `claude-opus-4-6`, `claude-haiku-4-5-20251001`, and the older
@@ -62,6 +65,12 @@ pub fn rates(id: &str) -> Option<(f64, f64, f64)> {
         _ => return None,
     };
     Some((input, input * read, output))
+}
+
+/// True when `served` is another model than the `asked` one: a declined request that a fallback answered. A dated id
+/// (`claude-haiku-4-5-20251001` for `claude-haiku-4-5`) is the same model; an id this app cannot read never counts.
+pub fn fell_back(asked: &str, served: &str) -> bool {
+    generation(asked).is_some_and(|asked| Some(asked) != generation(served))
 }
 
 /// The thinking fields. Thinking is adaptive (the model decides how much) and its depth is the effort; off is low effort,
@@ -220,15 +229,13 @@ pub fn request(body: &Value) -> Value {
     let (mut system, turns) = conversation(body["messages"].as_array().map_or(&[][..], Vec::as_slice), !tools.is_empty());
     // The everyday tools end at `load_tools`; groups loaded later come after it. Marked there, the tools are read from
     // the cache even when a group was just loaded or another chat loaded others: a list one tool shorter read 0 of
-    // 16,876 tokens and wrote them all again at the hour's double price (Haiku 5.5, 2026-10-28). The mark takes the
-    // rules' place, as only four are allowed and the rules are kept by the history's mark after them anyway.
+    // 16,876 tokens and wrote them all again at the hour's double price (Haiku 5.5, 2026-10-28). The rules keep their
+    // own mark beside it: without it a new chat, or one in another folder, read only the tools (7,551 of 14,967 tokens,
+    // Haiku 5.5, 2026-10-30) and wrote the rules again at the hour's price.
     let marked = system.iter().find_map(|block| block.get("cache_control").cloned());
     let everyday_end = tools.iter().position(|t| t["name"] == "load_tools").or(tools.len().checked_sub(1));
     if let (Some(mark), Some(end)) = (marked, everyday_end) {
         tools[end]["cache_control"] = mark;
-        system.iter_mut().for_each(|block| {
-            block.as_object_mut().map(|b| b.remove("cache_control"));
-        });
     }
     let mut out = Map::new();
     for key in ["model", "max_tokens", "stream", "cache_control", "thinking", "output_config"] {
@@ -236,6 +243,20 @@ pub fn request(body: &Value) -> Value {
             out.insert(key.into(), value.clone());
         }
     }
+    // Four marks at most, or the request is refused. The whole-request mark goes first: in a round with a marked tool
+    // result it lands on the work state after it, which the next round no longer sends. Then the rules' own.
+    let set = tools.iter().chain(&system).chain(turns.iter().flat_map(|(_, blocks)| blocks)).map(marks).sum::<usize>();
+    if set + out.contains_key("cache_control") as usize > 4 {
+        out.remove("cache_control");
+    }
+    if set > 4 {
+        system.iter_mut().for_each(|block| {
+            block.as_object_mut().map(|b| b.remove("cache_control"));
+        });
+    }
+    // A request Claude's safety check declines is run again on the model Anthropic names for what was declined,
+    // in the same request (`BETAS`): a false alarm on reverse engineering no longer ends the chat's work.
+    out.insert("fallbacks".into(), json!("default"));
     out.entry("max_tokens").or_insert(json!(16_000));
     if !system.is_empty() {
         out.insert("system".into(), json!(system));
@@ -247,6 +268,15 @@ pub fn request(body: &Value) -> Value {
         out.insert("tools".into(), json!(tools));
     }
     Value::Object(out)
+}
+
+/// The cache marks in a block, nested ones (a tool result's) too.
+fn marks(v: &Value) -> usize {
+    match v {
+        Value::Object(o) => o.contains_key("cache_control") as usize + o.values().map(marks).sum::<usize>(),
+        Value::Array(a) => a.iter().map(marks).sum(),
+        _ => 0,
+    }
 }
 
 fn finish(stop: Option<&str>) -> Value {
@@ -311,7 +341,10 @@ impl Events {
     pub fn chunk(&mut self, event: &Value) -> Option<Value> {
         let delta = |d: Value| json!({ "choices": [{ "delta": d }] });
         match event["type"].as_str()? {
-            "message_start" => Some(json!({ "usage": self.count(&event["message"]["usage"]) })),
+            // The model that answers, which is another than the one asked for when a declined request fell back
+            // (`fallbacks`): read where OpenRouter names its endpoint.
+            "message_start" => Some(json!({ "usage": self.count(&event["message"]["usage"]), "provider": event["message"]["model"] })),
+            "content_block_start" if event["content_block"]["type"] == "fallback" => Some(json!({ "provider": event["content_block"]["to"]["model"] })),
             "content_block_start" if event["content_block"]["type"] == "tool_use" => {
                 let block = &event["content_block"];
                 let call = self.calls.len();
@@ -330,7 +363,8 @@ impl Events {
                     _ => None,
                 }
             }
-            "message_delta" => Some(json!({ "choices": [{ "delta": {}, "finish_reason": finish(event["delta"]["stop_reason"].as_str()) }], "usage": self.count(&event["usage"]) })),
+            // A refusal says why in `stop_details` ("cyber", "reasoning_extraction", or null).
+            "message_delta" => Some(json!({ "choices": [{ "delta": {}, "finish_reason": finish(event["delta"]["stop_reason"].as_str()) }], "usage": self.count(&event["usage"]), "stop_details": event["delta"]["stop_details"] })),
             "error" => Some(json!({ "error": event["error"] })),
             _ => None,
         }
@@ -464,9 +498,11 @@ mod tests {
         for gone in ["stream_options", "session_id", "temperature"] {
             assert!(sent.get(gone).is_none(), "{gone}");
         }
-        // The rules' cache mark moves to the end of the everyday tools, before the rules in Claude's cache order.
-        assert_eq!(sent["system"], json!([{ "type": "text", "text": "rules" }, { "type": "text", "text": "summary" }]));
+        // The rules keep their cache mark, and the end of the everyday tools gets one too (Claude's cache order is
+        // tools, then rules); a declined request falls back.
+        assert_eq!(sent["system"], json!([{ "type": "text", "text": "rules", "cache_control": { "type": "ephemeral" } }, { "type": "text", "text": "summary" }]));
         assert_eq!(sent["tools"][0]["cache_control"], json!({ "type": "ephemeral" }));
+        assert_eq!(sent["fallbacks"], "default");
         assert_eq!(sent["tools"][0]["input_schema"]["properties"]["path"]["type"], "string");
         assert_eq!((sent["tool_choice"].clone(), sent["cache_control"].clone(), sent["output_config"]["effort"].clone()), (json!({ "type": "auto" }), json!({ "type": "ephemeral" }), json!("high")));
         let turns = sent["messages"].as_array().unwrap();
@@ -482,6 +518,13 @@ mod tests {
         assert!(user[2]["text"].as_str().unwrap().starts_with("<system-reminder>\nWorkspace changes since"));
         // A request never ends on Claude's own words.
         assert_eq!(turns[4]["content"][0]["text"], "Continue.");
+        // Four marks at most: the whole-request one gives way first, then the rules'.
+        let mut five = body.clone();
+        five["messages"][7]["content"] = json!([{ "type": "text", "text": "state", "cache_control": { "type": "ephemeral" } }]);
+        let sent = request(&five);
+        assert!(sent.get("cache_control").is_none() && sent["system"][0]["cache_control"].is_object());
+        five["messages"][2]["content"][0]["cache_control"] = json!({ "type": "ephemeral" });
+        assert!(request(&five)["system"][0].get("cache_control").is_none());
         // Without tools, the calls and their results ride as text.
         let mut bare = body.clone();
         bare.as_object_mut().unwrap().remove("tools");
@@ -519,6 +562,13 @@ mod tests {
         let used = crate::models::Usage::from_wire(&last["usage"]);
         assert_eq!((used.prompt, used.cache_hit, used.cache_miss, used.completion), (1140, 1000, 165, 30));
         assert!(events.chunk(&json!({ "type": "error", "error": { "type": "overloaded_error", "message": "Overloaded" } })).unwrap()["error"]["message"] == "Overloaded");
+        // The model that answered is named, a fallback's too, and a refusal says why.
+        let mut events = Events::default();
+        assert_eq!(events.chunk(&json!({ "type": "message_start", "message": { "model": "claude-opus-4-8", "usage": {} } })).unwrap()["provider"], "claude-opus-4-8");
+        assert_eq!(events.chunk(&json!({ "type": "content_block_start", "index": 1, "content_block": { "type": "fallback", "from": { "model": "claude-opus-5-5" }, "to": { "model": "claude-opus-5" } } })).unwrap()["provider"], "claude-opus-5");
+        let declined = events.chunk(&json!({ "type": "message_delta", "delta": { "stop_reason": "refusal", "stop_details": { "type": "refusal", "category": "reasoning_extraction" } }, "usage": { "output_tokens": 0 } })).unwrap();
+        assert_eq!((declined["choices"][0]["finish_reason"].as_str(), declined["stop_details"]["category"].as_str()), (Some("content_filter"), Some("reasoning_extraction")));
+        assert!(fell_back("claude-opus-5-5", "claude-opus-4-8") && !fell_back("claude-haiku-4-5", "claude-haiku-4-5-20251001") && !fell_back("claude-x-latest", "claude-opus-4-8"));
     }
 
     #[tokio::test]

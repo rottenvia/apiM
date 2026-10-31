@@ -323,8 +323,13 @@ impl Usage {
     pub fn shown_cost(&self, model_id: &str, customs: &[CustomModel], off_peak: bool) -> Option<f64> {
         let (input, cached, output) = rates(model_id, customs)?;
         let factor = if off_peak && resolve(model_id, customs).provider == ProviderId::Deepseek { 0.5 } else { 1.0 };
+        Some(self.cost_at((input * factor, cached, output * factor)))
+    }
+
+    /// What it cost at these prices, in USD per million tokens: input, cached input, output.
+    pub fn cost_at(&self, (input, cached, output): (f64, f64, f64)) -> f64 {
         let miss = if self.cache_miss > 0 { self.cache_miss } else { self.prompt.saturating_sub(self.cache_hit) };
-        Some((miss as f64 * input * factor + self.cache_hit as f64 * cached + self.completion as f64 * output * factor) / 1e6)
+        (miss as f64 * input + self.cache_hit as f64 * cached + self.completion as f64 * output) / 1e6
     }
 }
 

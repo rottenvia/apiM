@@ -56,6 +56,8 @@ export type DiagnosticKind =
   | "api_error"
   | "limit_hit"
   | "run_stopped"
+  /** A step ran long and was nudged at a checkpoint; the run went on (the desktop's kind of the same name). */
+  | "run_checkpoint"
   /** The reply described work no tool performed. */
   | "unverified_claim"
   | "ui_error";
@@ -235,6 +237,7 @@ const KIND_LABEL: Record<DiagnosticKind, string> = {
   api_error: "API error",
   limit_hit: "Hit a limit",
   run_stopped: "Run stopped early",
+  run_checkpoint: "Long step",
   unverified_claim: "Claimed work no tool did",
   ui_error: "Interface error",
 };

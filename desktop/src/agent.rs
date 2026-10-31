@@ -796,6 +796,8 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
     let mut lone_plan_rounds = 0u8;
     let (mut claim_retried, mut asked_early, mut asked_plan, mut nudged_incomplete) = (false, false, false, false);
     let mut served_by: Option<String> = None;
+    // Said once a reply: the request Claude's safety check declined was answered by another Claude model.
+    let mut told_fallback = false;
     // The guards: one call failing identically, calls that add nothing, a read-only streak, whole-file rewrites, a preview taken for an edit.
     let mut breaker = LoopBreaker::default();
     let mut stalls = StallTracker::default();
@@ -1003,11 +1005,12 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         let dedup = std::mem::take(&mut continuation_pending).then(|| ContinuationDedup::new(&answer));
         // Two thinks in a row would otherwise run together in the thought box.
         let gap = !thought.is_empty() && !thought.trim_end_matches([' ', '\t', '\r']).ends_with('\n');
-        let cut_drafts = thinking_now && draft_cutovers < stall::MAX_DRAFT_CUTOVERS;
+        // Not on Claude: its thinking arrives as a summary, and a thought handed back as its own words is refused (`Thoughts::Gone`).
+        let cut_drafts = thinking_now && !claude && draft_cutovers < stall::MAX_DRAFT_CUTOVERS;
         let (result, without_tools) = call_model(&ctx.client, target, &mut body, &mut lane, dedup, cut_drafts, gap, emit).await.inspect_err(|e| log("api_error", &target.model.id, e))?;
         let ran_without_tools = without_tools;
 
-        let provider::Round { content, reasoning, tool_calls: mut calls, finish, usage: round_usage, fields, draft_cut, served, timing } = result;
+        let provider::Round { content, reasoning, tool_calls: mut calls, finish, usage: round_usage, fields, draft_cut, served, timing, refusal } = result;
         for call in &mut calls {
             if let Some((name, args)) = tools::marked_name(&call.name) {
                 call.name = name;
@@ -1034,8 +1037,15 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
                 Usage { prompt, completion: (reasoning.chars().count() as u64).div_ceil(4), cache_miss: prompt, ..Default::default() }
             })
         });
+        // A declined request answered by another Claude model (`anthropic::request`'s fallbacks) is billed at its prices.
+        let fell_back = served_by.as_deref().filter(|by| claude && crate::anthropic::fell_back(&target.api_model, by)).map(str::to_string);
+        if let Some(by) = fell_back.as_deref().filter(|_| !told_fallback) {
+            told_fallback = true;
+            notice(&format!("Claude's safety check declined this request on {}; {by} answered it instead", target.api_model));
+            log_with("refusal", "fell back", &format!("{} declined round {round}; {by} answered.", target.api_model), json!({ "model": target.api_model, "servedBy": by, "round": round }));
+        }
         if let Some(u) = round_usage {
-            last_round_cost = u.cost(&target.model.id, customs).unwrap_or(0.0);
+            last_round_cost = fell_back.as_deref().and_then(crate::anthropic::rates).map_or_else(|| u.cost(&target.model.id, customs).unwrap_or(0.0), |rates| u.cost_at(rates));
             spend.spent += last_round_cost;
             usage.add(u);
             emit.send(Event::Usage(usage));
@@ -1049,6 +1059,17 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
         since_work.push_str(&content);
         last_finish = finish.clone();
         let finish = finish.unwrap_or_default().to_ascii_lowercase();
+        let declined = claude && finish == "content_filter";
+        if declined {
+            // Said, and written down: a refusal used to leave an empty reply and no trace in the problem log.
+            let category = refusal.as_deref().unwrap_or("unnamed");
+            log_with("refusal", category, &format!("{} declined round {round} ({category}), and no fallback model answered it.", target.api_model), json!({ "model": target.api_model, "round": round }));
+            notice(&if category == "reasoning_extraction" {
+                "Claude's safety check declined this request: it read part of the chat as asking for the model's hidden reasoning (reasoning_extraction), a kind no fallback model is tried for".to_string()
+            } else {
+                format!("Claude's safety check declined this request ({category}), and the fallback model declined it too")
+            });
+        }
 
         // The think was drafting a whole program: hand it back as the model's own words and have it write the files, without another think.
         if let Some(lines) = draft_cut {
@@ -1068,7 +1089,7 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
             // Dropped mid-think. A long think is handed back so the analysis is not started over; a short one is simply asked again.
             stream_cuts += 1;
             no_think_next = no_think_round;
-            if reasoning.chars().count() >= stall::DROPPED_THINK_CARRY_CHARS {
+            if !claude && reasoning.chars().count() >= stall::DROPPED_THINK_CARRY_CHARS {
                 messages.push(assistant(&stall::draft_carry(&reasoning, Some("the connection dropped mid-thought")), ""));
                 messages.push(user(stall::DROPPED_THINK_TEXT));
             }
@@ -1166,10 +1187,11 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
                 // A short answer is an answer: "Done." after the work, or the one word that was asked for. Read as "nothing
                 // was written", it was asked again twice, a whole request each time, and then marked as stopped mid-task.
                 Some(Premature::EmptyAfterWork) if !content.trim().is_empty() => {}
-                Some(reason) if auto_revives < revive::MAX_AUTO_REVIVES => {
+                // A declined request is declined again as it stands: asking once more only pays for the same answer.
+                Some(reason) if auto_revives < revive::MAX_AUTO_REVIVES && !declined => {
                     auto_revives += 1;
                     messages.push(user(revive::revive_instruction(reason, ran_without_tools)));
-                    log_with("run_stopped", "premature stop", &format!("Auto-continued a mid-task stop ({}).", reason.key()), json!({ "n": auto_revives, "rounds": tool_rounds }));
+                    log_with("run_continued", "premature stop", &format!("Auto-continued a mid-task stop ({}).", reason.key()), json!({ "n": auto_revives, "rounds": tool_rounds }));
                     notice(&format!("The model stopped mid-task — continuing from where it left off ({auto_revives}/{})", revive::MAX_AUTO_REVIVES));
                     continue;
                 }
@@ -1178,8 +1200,11 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
             break;
         }
 
-        // The limit is asked again before the tools run: one round can cross it on its own.
-        if over_budget(&mut spend, last_round_cost, tool_rounds, emit) {
+        // The limit is asked again before the tools run only where they would spend more of it: a helper is a model of
+        // its own. Other calls cost nothing more, so they run, and the limit stops the next request instead (the check at
+        // the loop's top). Stopped here, a round that had just written a whole test file ($0.73 on Fable 5.1) was left out
+        // of the transcript, and Resume paid for the same file again.
+        if calls.iter().any(|c| c.name == "delegate") && over_budget(&mut spend, last_round_cost, tool_rounds, emit) {
             // ponytail: the web keeps this turn and answers each pending call "Not run — the spending limit for this reply was reached …".
             // Here the turn is left out of the transcript instead, so a resumed one stays legal and the model asks for those calls again.
             halt = Some(Halt::Budget);
@@ -1459,7 +1484,8 @@ async fn drive(target: &Target, ctx: &Ctx, mut messages: Vec<Value>, all_tools: 
     if let (Some(Halt::Budget), Some(limit)) = (&halt, spend.limit) {
         emit.send(Event::Content(format!("{gap}{}", budget::budget_stop_message(spend.spent, limit, true))));
     }
-    if thinking && thought.is_empty() {
+    // Not for Claude: its adaptive thinking may skip a think, and a summary can come back empty, so a reply with none is no fault.
+    if thinking && thought.is_empty() && !(target.provider == ProviderId::Anthropic || target.api_model.starts_with("anthropic/")) {
         // ponytail: the web also shows "No plain-text reasoning was present in the upstream stream…" in the thought box;
         // a notice in every reply of a model that never thinks would be noise, so only the diagnostics keep it.
         let seen = if fields_seen.is_empty() { "none".to_string() } else { fields_seen.iter().cloned().collect::<Vec<_>>().join(", ") };
@@ -2430,12 +2456,12 @@ mod tests {
         assert_eq!((ran.text.as_str(), ran.sent.len()), ("Done.", 2));
         let first = &ran.sent[0];
         assert_eq!((first["thinking"].clone(), first["output_config"].clone(), first["cache_control"].clone()), (json!({ "type": "adaptive", "display": "summarized" }), json!({ "effort": "high" }), json!({ "type": "ephemeral" })));
-        // The tools (and with them the rules after them) and the chat before the question are kept an hour; the note
-        // before the question is not part of either.
+        // The tools, the rules after them and the chat before the question are kept an hour, each with a mark of its own;
+        // the note before the question is part of none.
         let hour = json!({ "type": "ephemeral", "ttl": "1h" });
         let tools = first["tools"].as_array().unwrap();
         assert_eq!((&tools[tools.len() - 1]["cache_control"], &first["messages"][1]["content"][0]["cache_control"]), (&hour, &hour));
-        assert!(first["system"][0].get("cache_control").is_none());
+        assert_eq!(first["system"][0]["cache_control"], hour);
         assert!(first["messages"][2]["content"][0]["text"].as_str().unwrap().contains("Today is") && first["messages"][2]["content"][0].get("cache_control").is_none());
         // The turns alternate, the call and its result pair up, and the request ends on the user's turn.
         let turns = ran.sent[1]["messages"].as_array().unwrap();
@@ -2553,9 +2579,12 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn the_spending_limit_stops_the_run_before_its_tools() {
+    async fn the_spending_limit_stops_the_next_request_after_the_paid_tools_ran() {
         let costly = json!({ "choices": [], "usage": { "prompt_tokens": 10_000_000, "completion_tokens": 1_000, "total_tokens": 10_001_000 } });
-        let (text, end, _, sent) = reply(vec![sse(&[calls("list_files", "{}"), costly])], "none", Some(0.01)).await;
+        let ran = run_with(vec![sse(&[calls("list_files", "{}"), costly])], "none", Some(0.01), |dir| opening(dir, "q")).await;
+        let (text, end, sent) = (ran.text, ran.end, ran.sent);
+        // The round that crossed the limit is paid for: its call runs, and only the next request is not sent.
+        assert_eq!(ran.steps.len(), 1, "{:?}", ran.steps);
         assert!(text.starts_with("Stopped at your spending limit — this reply has cost $"), "{text}");
         assert_eq!(end.stop_reason.as_deref(), Some("Stopped at your $0.01 spending limit — the work so far is saved, use Resume to continue"));
         // One cent buys at most 35,714 output tokens of this model: the request was capped to that.

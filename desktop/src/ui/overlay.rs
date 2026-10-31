@@ -292,7 +292,7 @@ pub fn artifact(app: &mut App, ctx: &egui::Context) {
                         *close = true;
                     }
                     if head_btn(ui, icons::DOWNLOAD.stroke(1.7), 32.0, 15.0, false, "Download").clicked() {
-                        if let Some(path) = rfd::FileDialog::new().set_file_name(file_name(&shown.title, &shown.language)).save_file() {
+                        if let Some(path) = crate::diagnostics::modal(|| rfd::FileDialog::new().set_file_name(file_name(&shown.title, &shown.language)).save_file()) {
                             let _ = std::fs::write(path, &shown.code);
                         }
                     }

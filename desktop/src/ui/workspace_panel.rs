@@ -214,7 +214,7 @@ fn save_as(app: &mut App, path: &str) {
     let root = app.conv.workspace();
     let st = &mut app.ws.panel;
     let name = Path::new(path).file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
-    let Some(target) = rfd::FileDialog::new().set_file_name(name).save_file() else { return };
+    let Some(target) = crate::diagnostics::modal(|| rfd::FileDialog::new().set_file_name(name).save_file()) else { return };
     let done = match (st.look, snapshots::resolve_inside(&root, path)) {
         (Look::Text, _) if !st.truncated => std::fs::write(&target, &st.draft).map_err(|e| e.to_string()),
         (_, Ok(from)) => std::fs::copy(from, &target).map(|_| ()).map_err(|e| e.to_string()),
