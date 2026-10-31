@@ -11,6 +11,10 @@
 //! opened for the user waits for them, one the agent is studying plays on without sound.
 //!
 //! A page is known by its chat's workspace folder (`key`), which both the window and the tools have.
+//!
+//! In the window on Windows the page is a real browser instead (`real`): a WebView2 view the UI places over the pane,
+//! driven over the same protocol. The user's clicks reach it as a person's, which a site's check for a person needs: in
+//! the headless browser every click was put in by apiM, and Cloudflare's check asked again and again (2026-10-31).
 
 use super::cdp::Cdp;
 use super::page::Page;
@@ -18,7 +22,7 @@ use super::Browser;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -59,6 +63,9 @@ pub struct View {
     pub pointer: Option<Pointer>,
     /// What was last asked of the page's sound and playback: (muted, held). None after a navigation, so it is asked again.
     media: Option<(bool, bool)>,
+    /// The address the chat's real view was made at (`real`), which finds it among the browser's pages. The UI keeps a
+    /// view for each, and lets it go when this does.
+    pub real: Option<String>,
 }
 
 /// One move of the agent's pointer, in the page's CSS pixels.
@@ -88,6 +95,30 @@ static SESSION: LazyLock<tokio::sync::Mutex<Option<Shared>>> = LazyLock::new(Def
 static STREAMED: StdMutex<Option<String>> = StdMutex::new(None);
 static WAKE: OnceLock<Box<dyn Fn() + Send + Sync>> = OnceLock::new();
 static RUNTIME: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+static REAL: AtomicBool = AtomicBool::new(false);
+
+/// The window makes the pages: real views in the pane (`ui::webview`), not a headless browser's. Said once, at start.
+pub fn use_views() {
+    REAL.store(true, Ordering::SeqCst);
+}
+
+/// The pages are the window's real views. Without a window (`--ask`), or without WebView2, they are headless.
+pub fn real() -> bool {
+    REAL.load(Ordering::SeqCst)
+}
+
+/// The address each real view is made at, for the UI to make the ones it lacks and let go of the rest.
+pub fn marks() -> Vec<String> {
+    VIEWS.lock().unwrap_or_else(|e| e.into_inner()).values().filter_map(|v| v.real.clone()).collect()
+}
+
+/// The UI could not make the view at `mark`: the chat says why, and the view is not asked for again.
+pub fn unmade(mark: &str, why: String) {
+    if let Some(v) = VIEWS.lock().unwrap_or_else(|e| e.into_inner()).values_mut().find(|v| v.real.as_deref() == Some(mark)) {
+        (v.real, v.error) = (None, Some(format!("Could not open the browser view: {why}")));
+    }
+    wake();
+}
 
 /// The name a chat's page goes by: its workspace folder, spelled one way.
 pub fn key(root: &Path) -> String {
@@ -164,8 +195,16 @@ pub async fn page(root: &Path) -> Result<Arc<Page>, String> {
         *session = None;
         forget_all();
     }
+    // The chat's real view, asked of the UI: it is made on the next frame. The process's number keeps two apiMs on one
+    // data folder, whose views share one browser, from finding each other's.
+    let mark = real().then(|| {
+        static MADE: AtomicU64 = AtomicU64::new(0);
+        let mark = with_key(&key, |v| v.real.get_or_insert_with(|| format!("about:blank#apim-{}-{}", std::process::id(), MADE.fetch_add(1, Ordering::SeqCst))).clone());
+        wake();
+        mark
+    });
     if session.is_none() {
-        let (browser, events) = super::launch().await?;
+        let (browser, events) = if real() { super::views().await? } else { super::launch().await? };
         let subs: Arc<StdMutex<HashMap<String, mpsc::UnboundedSender<Value>>>> = Default::default();
         let alive = Arc::new(AtomicBool::new(true));
         tokio::spawn(route(events, subs.clone(), alive.clone()));
@@ -183,12 +222,12 @@ pub async fn page(root: &Path) -> Result<Arc<Page>, String> {
         subs.lock().unwrap_or_else(|e| e.into_inner()).insert(sid.to_string(), tx);
         rx
     };
-    let page = Arc::new(Page::open(shared.browser.cdp.clone(), subscribe, Some(root.to_path_buf())).await?);
+    let page = Arc::new(Page::open(shared.browser.cdp.clone(), subscribe, Some(root.to_path_buf()), mark.as_deref()).await?);
     SIDS.lock().unwrap_or_else(|e| e.into_inner()).insert(page.sid().to_string(), key.clone());
     shared.pages.insert(key.clone(), page.clone());
     with_key(&key, |v| {
         reset(v);
-        (v.running, v.error, v.last_used, v.viewport) = (true, None, Some(Instant::now()), VIEWPORT);
+        (v.running, v.error, v.last_used, v.viewport, v.real) = (true, None, Some(Instant::now()), VIEWPORT, mark);
     });
     if STREAMED.lock().unwrap_or_else(|e| e.into_inner()).as_deref() == Some(key.as_str()) {
         let _ = page.screencast(true).await;
@@ -259,9 +298,9 @@ async fn route(mut events: mpsc::UnboundedReceiver<Value>, subs: Arc<StdMutex<Ha
 }
 
 /// A view whose page is gone: no picture, no address, nothing loading. A page discarded mid-load kept its progress bar
-/// and its last frame, and a mouse move over that frame opened a page again.
+/// and its last frame, and a mouse move over that frame opened a page again. A real view is let go with it.
 fn reset(v: &mut View) {
-    (v.running, v.rgba, v.size, v.url, v.title, v.check, v.loading, v.pointer, v.media) = (false, Arc::default(), [0, 0], String::new(), String::new(), false, false, None, None);
+    (v.running, v.rgba, v.size, v.url, v.title, v.check, v.loading, v.pointer, v.media, v.real) = (false, Arc::default(), [0, 0], String::new(), String::new(), false, false, None, None, None);
     v.seq += 1;
 }
 

@@ -33,6 +33,8 @@ pub mod theme;
 mod titlebar;
 mod trim;
 mod widgets;
+#[cfg(windows)]
+mod webview;
 mod docks;
 mod github;
 mod import_files;
@@ -444,6 +446,9 @@ impl App {
             drafts: drafts::Drafts::load(),
             editing: None,
             artifact: None,
+            #[cfg(windows)]
+            browser: browser_pane::State::in_window(webview::Parent::of(cc)),
+            #[cfg(not(windows))]
             browser: Default::default(),
             lightbox: None,
             attach_error: None,
@@ -2015,6 +2020,14 @@ impl App {
                 }
                 _ => false,
             },
+            // The mouse comes to the point and stays: a hover, for a tip.
+            "move" => match text.split_whitespace().filter_map(|n| n.parse().ok()).collect::<Vec<f32>>()[..] {
+                [x, y] => {
+                    self.shot.as_mut().unwrap().pointer.push_back(egui::Event::PointerMoved(egui::pos2(x, y)));
+                    true
+                }
+                _ => false,
+            },
             _ => false,
         };
         if done {
@@ -2400,6 +2413,8 @@ impl eframe::App for App {
                 eprintln!("late {since:.0} ms at {:.1} s (app {took:.1} ms)", BORN.elapsed().as_secs_f32());
             }
         }
+        #[cfg(windows)]
+        browser_pane::serve(&mut self.browser, &ctx);
     }
 }
 

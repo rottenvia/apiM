@@ -104,9 +104,10 @@ impl Drop for Process {
     }
 }
 
-/// A running headless browser. Dropping it ends the session.
+/// A running browser. Dropping it ends the session. The real views in the pane (`live::real`) have no process here:
+/// their browser is WebView2's, and it goes with the last view.
 pub struct Browser {
-    _proc: Process,
+    _proc: Option<Process>,
     pub cdp: cdp::Cdp,
 }
 
@@ -114,14 +115,40 @@ impl Browser {
     /// Asks the browser to close and gives it two seconds to be gone before it is killed: it writes the profile's
     /// cookies on its way out, and killed at once a sign-in of the last half minute could be lost.
     pub async fn quit(mut self) {
+        let Some(proc) = &mut self._proc else { return };
         let _ = tokio::time::timeout(Duration::from_secs(2), self.cdp.call("Browser.close", serde_json::json!({}), None)).await;
         for _ in 0..40 {
-            if matches!(self._proc.child.try_wait(), Ok(Some(_))) {
+            if matches!(proc.child.try_wait(), Ok(Some(_))) {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
     }
+}
+
+/// Connects to the browser behind the pane's real views, once the UI has made the first (`live::real`). Its DevTools
+/// port is in a file of WebView2's profile. A file left by an earlier run names a port long closed, so it is read
+/// again until the port answers, rather than removed: a browser still up from a moment ago writes no new one.
+pub async fn views() -> Result<(Browser, mpsc::UnboundedReceiver<Value>), String> {
+    let file = crate::store::data_dir().join("webview").join("EBWebView").join("DevToolsActivePort");
+    let started = Instant::now();
+    loop {
+        if let Some((port, path)) = std::fs::read_to_string(&file).ok().as_deref().and_then(port) {
+            if let Ok((cdp, events)) = cdp::Cdp::connect(port, &path).await {
+                return Ok((Browser { _proc: None, cdp }, events));
+            }
+        }
+        if started.elapsed() > Duration::from_secs(20) {
+            return Err("Could not open the browser view: it did not open its debug port within 20 seconds.".to_string());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// The port and the path a browser writes into `DevToolsActivePort` once it listens.
+fn port(text: &str) -> Option<(u16, String)> {
+    let mut lines = text.lines();
+    Some((lines.next()?.trim().parse().ok()?, lines.next()?.trim().to_string()))
 }
 
 /// Start a headless browser and connect to it. Returns the browser and the stream of its events (console, exceptions,
@@ -167,13 +194,8 @@ async fn start(exe: &Path, profile: &Path, throwaway: bool) -> Result<(Browser, 
         if let Ok(Some(_)) = proc.child.try_wait() {
             return Err("Could not start the browser: it quit at once (its profile is in use by another apiM).".to_string());
         }
-        if let Ok(text) = std::fs::read_to_string(&file) {
-            let mut lines = text.lines();
-            if let (Some(port), Some(path)) = (lines.next(), lines.next()) {
-                if let Ok(port) = port.trim().parse::<u16>() {
-                    break (port, path.trim().to_string());
-                }
-            }
+        if let Some(found) = std::fs::read_to_string(&file).ok().as_deref().and_then(port) {
+            break found;
         }
         if started.elapsed() > Duration::from_secs(15) {
             return Err("Could not start the browser: it did not open its debug port within 15 seconds.".to_string());
@@ -182,7 +204,7 @@ async fn start(exe: &Path, profile: &Path, throwaway: bool) -> Result<(Browser, 
     };
 
     let (cdp, events) = cdp::Cdp::connect(port, &path).await.map_err(|e| format!("Could not start the browser: {e}"))?;
-    Ok((Browser { _proc: proc, cdp }, events))
+    Ok((Browser { _proc: Some(proc), cdp }, events))
 }
 
 /// The browser as anyone uses it, on the Browser pane's profile: a window of its own with nothing driving it, and not
@@ -237,6 +259,16 @@ fn tie_to_this_process(pid: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_debug_port_is_read_from_its_file() {
+        assert_eq!(port("9222
+/devtools/browser/ab-12
+"), Some((9222, "/devtools/browser/ab-12".to_string())));
+        assert_eq!(port("9222
+"), None, "written half way");
+        assert_eq!(port(""), None);
+    }
 
     /// The headless browser names the version installed, as it would in a window, and Edge says it is Edge.
     #[test]

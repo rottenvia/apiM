@@ -443,16 +443,22 @@ pub struct Page {
     alive: Arc<std::sync::atomic::AtomicBool>,
     /// The page is streaming its frames to the pane.
     casting: std::sync::atomic::AtomicBool,
+    /// A real view in the pane (`live::real`): the UI made it and closes it, and the user sees it as it is, at its own
+    /// size, with no frames to send.
+    view: bool,
 }
 
 impl Page {
     /// Open a blank page on the browser and turn on the events and the request check. `subscribe` gives the page its
-    /// share of the browser's events once its session is known.
-    pub async fn open(cdp: Cdp, subscribe: impl FnOnce(&str) -> mpsc::UnboundedReceiver<Value>, root: Option<PathBuf>) -> Result<Page, String> {
-        // A window of its own: a second tab in one window is a hidden tab, whose timers and video the browser slows down,
-        // and whose screenshots can come back stale.
-        let target = cdp.call("Target.createTarget", json!({ "url": "about:blank", "newWindow": true }), None).await?;
-        let target = target["targetId"].as_str().unwrap_or("").to_string();
+    /// share of the browser's events once its session is known. With `view`, the page is the pane's real view that the
+    /// UI made at that address (`live::real`), rather than a new one.
+    pub async fn open(cdp: Cdp, subscribe: impl FnOnce(&str) -> mpsc::UnboundedReceiver<Value>, root: Option<PathBuf>, view: Option<&str>) -> Result<Page, String> {
+        let target = match view {
+            Some(mark) => find(&cdp, mark).await?,
+            // A window of its own: a second tab in one window is a hidden tab, whose timers and video the browser slows
+            // down, and whose screenshots can come back stale.
+            None => cdp.call("Target.createTarget", json!({ "url": "about:blank", "newWindow": true }), None).await?["targetId"].as_str().unwrap_or("").to_string(),
+        };
         let ready = async {
             let attached = cdp.call("Target.attachToTarget", json!({ "targetId": target, "flatten": true }), None).await?;
             let sid = attached["sessionId"].as_str().ok_or_else(|| "the browser did not attach a page".to_string())?.to_string();
@@ -460,8 +466,11 @@ impl Page {
             for method in ["Page.enable", "Runtime.enable", "Network.enable"] {
                 cdp.call(method, json!({}), Some(&sid)).await?;
             }
-            let (width, height) = crate::browser::live::VIEWPORT;
-            cdp.call("Emulation.setDeviceMetricsOverride", json!({ "width": width, "height": height, "deviceScaleFactor": 1, "mobile": false }), Some(&sid)).await?;
+            // A real view is laid out at the size it has on screen, as any browser window is.
+            if view.is_none() {
+                let (width, height) = crate::browser::live::VIEWPORT;
+                cdp.call("Emulation.setDeviceMetricsOverride", json!({ "width": width, "height": height, "deviceScaleFactor": 1, "mobile": false }), Some(&sid)).await?;
+            }
             // Every window believes it has the focus, so a site that pauses when it loses it plays on for the agent.
             let _ = cdp.call("Emulation.setFocusEmulationEnabled", json!({ "enabled": true }), Some(&sid)).await;
             cdp.call("Page.addScriptToEvaluateOnNewDocument", json!({ "source": crate::browser::live::MEDIA_JS }), Some(&sid)).await?;
@@ -473,7 +482,9 @@ impl Page {
         let (sid, events) = match ready.await {
             Ok(ready) => ready,
             Err(e) => {
-                let _ = cdp.call("Target.closeTarget", json!({ "targetId": target }), None).await;
+                if view.is_none() {
+                    let _ = cdp.call("Target.closeTarget", json!({ "targetId": target }), None).await;
+                }
                 return Err(e);
             }
         };
@@ -488,7 +499,7 @@ impl Page {
             pump(events, pump_cdp, pump_sid, pump_log, dom_tx, pump_root).await;
             gone.store(false, std::sync::atomic::Ordering::SeqCst);
         });
-        Ok(Page { cdp, sid, target, root, log, dom: dom_rx, alive, casting: Default::default() })
+        Ok(Page { cdp, sid, target, root, log, dom: dom_rx, alive, casting: Default::default(), view: view.is_some() })
     }
 
     pub fn alive(&self) -> bool {
@@ -508,9 +519,13 @@ impl Page {
         *self.root.lock().unwrap_or_else(|e| e.into_inner()) = Some(root);
     }
 
-    /// Closes the page's window. The browser stays up for the other chats.
+    /// Closes the page's window. The browser stays up for the other chats. A real view is the UI's to close
+    /// (`live::reset` lets it go).
     pub async fn close(&self) -> Result<(), String> {
         self.alive.store(false, std::sync::atomic::Ordering::SeqCst);
+        if self.view {
+            return Ok(());
+        }
         self.cdp.call("Target.closeTarget", json!({ "targetId": self.target }), None).await.map(|_| ())
     }
 
@@ -519,7 +534,7 @@ impl Page {
     /// browser sending nothing at all, and the pane said "Opening…" for good (two runs in five, 2026-10-28).
     pub async fn screencast(&self, on: bool) -> Result<(), String> {
         use std::sync::atomic::Ordering::SeqCst;
-        if self.casting.swap(on, SeqCst) == on {
+        if self.view || self.casting.swap(on, SeqCst) == on {
             return Ok(());
         }
         // Room for a stretched page at its widest, so a frame is never shrunk before the pane draws it.
@@ -744,6 +759,23 @@ impl Page {
     pub fn logs(&self) -> (Vec<String>, Vec<String>) {
         let log = self.log.lock().unwrap();
         (log.console.clone(), log.failed.clone())
+    }
+}
+
+/// The target of the real view the UI made at `mark` (`live::real`). The UI makes it on its next frame, so it may not
+/// be there yet.
+async fn find(cdp: &Cdp, mark: &str) -> Result<String, String> {
+    let started = Instant::now();
+    loop {
+        let all = cdp.call("Target.getTargets", json!({}), None).await?;
+        let found = all["targetInfos"].as_array().into_iter().flatten().find(|t| t["type"] == "page" && t["url"] == mark);
+        if let Some(id) = found.and_then(|t| t["targetId"].as_str()) {
+            return Ok(id.to_string());
+        }
+        if started.elapsed() > Duration::from_secs(20) {
+            return Err("The browser view did not open within 20 seconds.".to_string());
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 

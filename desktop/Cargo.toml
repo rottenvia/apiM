@@ -37,6 +37,11 @@ pdf-extract = "0.12.1"
 # The phone pairing code (Settings > Phone). No dependencies of its own.
 qrcodegen = "1.8"
 
+[target.'cfg(windows)'.dependencies]
+# A real browser view in the Browser pane (`ui::webview`): WebView2, part of Windows 11. The handle crate is already in the tree.
+wry = "0.57"
+raw-window-handle = "0.6"
+
 [profile.dev.package."*"]
 opt-level = 2
 

@@ -1,6 +1,7 @@
 //! The Browser pane: a card beside the chat showing the chat's own page live (`browser::live`), where the user can
 //! watch each step, take over with the mouse and keyboard, or open a page or a workspace file themselves. Stretched,
-//! the page fills the window and its player fills the page.
+//! the page fills the window and its player fills the page. On Windows the page is a real browser view placed over
+//! the card (`ui::webview`); elsewhere, and from `APIM_HEADLESS`, it is the headless browser's frames.
 
 use super::theme::{self, W, alpha, p};
 use super::{App, icons, titlebar, widgets};
@@ -28,6 +29,53 @@ pub struct State {
     stretch: Option<std::path::PathBuf>,
     /// When the pointer last moved over the stretched page: its way back shows for a moment after.
     stirred: Option<Instant>,
+    /// The window the real views live in (`live::real`), a view for each chat that has one by the address it was made
+    /// at, and where the pane drew the one on show this frame (its place and its corners' rounding, in pixels).
+    #[cfg(windows)]
+    parent: Option<super::webview::Parent>,
+    #[cfg(windows)]
+    views: std::collections::HashMap<String, super::webview::View>,
+    #[cfg(windows)]
+    place: Option<(String, [i32; 4], i32)>,
+}
+
+#[cfg(windows)]
+impl State {
+    /// For a pane in this window. Its pages are real views when WebView2 is there, unless `APIM_HEADLESS` says not.
+    pub fn in_window(parent: Option<super::webview::Parent>) -> State {
+        if parent.is_some() && std::env::var_os("APIM_HEADLESS").is_none() && super::webview::available() {
+            live::use_views();
+        }
+        State { parent, ..Default::default() }
+    }
+}
+
+/// Makes the real views the chats ask for and lets go of the rest, then puts the one the pane drew this frame where it
+/// drew it. The others go out of sight, where they go on drawing for the agent's screenshots. Called once a frame,
+/// after the pane: a view is a window of its own over apiM's, and stays where it was put until it is moved.
+#[cfg(windows)]
+pub fn serve(state: &mut State, ctx: &egui::Context) {
+    let place = state.place.take();
+    let Some(parent) = state.parent.filter(|_| live::real()) else { return };
+    let marks = live::marks();
+    state.views.retain(|mark, _| marks.contains(mark));
+    for mark in marks {
+        if !state.views.contains_key(&mark) {
+            // ponytail: made on the UI thread, which waits for it: 260 ms for the first, as WebView2's browser starts.
+            match super::webview::View::new(parent, &mark, ctx) {
+                Ok(view) => drop(state.views.insert(mark, view)),
+                Err(e) => live::unmade(&mark, e),
+            }
+        }
+    }
+    for (mark, view) in &mut state.views {
+        view.place(place.as_ref().filter(|(shown, ..)| shown == mark).map(|(_, at, corner)| (*at, *corner)));
+    }
+}
+
+/// No page to show: none yet, or the blank one a page starts on (a real view's carries its mark after the `#`).
+fn blank(url: &str) -> bool {
+    url.is_empty() || url.starts_with("about:blank")
 }
 
 /// The chat header's height, so the two rows of buttons line up across the window.
@@ -145,7 +193,11 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui, beside: f32, right_gap: f32, top_
 fn pane(app: &mut App, ui: &mut egui::Ui, card: Rect, round: f32) {
     let p = p();
     ui.painter().rect(card, round, p.bg, Stroke::new(1.0, alpha(p.border, 70.0)), StrokeKind::Inside);
-    let (url, loading, has_page) = live::with(&app.conv.workspace(), |v| (v.url.clone(), v.loading, v.running && v.size[0] > 0));
+    let (url, loading, has_page, doing) = live::with(&app.conv.workspace(), |v| {
+        // What the agent is doing, told in the bar over a real view, where nothing can be drawn on the page.
+        let doing = (live::real() && v.driving > 0).then(|| v.pointer.as_ref().filter(|p| p.when.elapsed() < Duration::from_secs(3)).map_or_else(|| "apiM is browsing".to_string(), |p| p.what.clone()));
+        (v.url.clone(), v.loading, v.running && (v.size[0] > 0 || (live::real() && !blank(&v.url))), doing)
+    });
 
     // The bar: back, forward, reload, the address, stretch, open outside, close.
     let bar = Rect::from_min_size(card.min, vec2(card.width(), BAR));
@@ -155,7 +207,7 @@ fn pane(app: &mut App, ui: &mut egui::Ui, card: Rect, round: f32) {
         let rect = Rect::from_center_size(pos2(*x + 14.0, bar.center().y), vec2(28.0, 28.0));
         *x += 30.0;
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
-        widgets::mini_btn(&mut child, icon, 28.0, 14.0, tip).clicked()
+        bar_btn(&mut child, icon, tip).clicked()
     };
     let mut go = None;
     if button(ui, &mut x, icons::CHEVRON_LEFT, "Back") {
@@ -171,15 +223,15 @@ fn pane(app: &mut App, ui: &mut egui::Ui, card: Rect, round: f32) {
     let web = url.starts_with("http");
     let outside = close_rect.translate(vec2(-30.0, 0.0));
     let stretch_at = if web { outside.translate(vec2(-30.0, 0.0)) } else { outside };
-    if widgets::mini_btn(&mut ui.new_child(egui::UiBuilder::new().max_rect(close_rect)), icons::CLOSE, 28.0, 14.0, "Close the browser pane").clicked() {
+    if bar_btn(&mut ui.new_child(egui::UiBuilder::new().max_rect(close_rect)), icons::CLOSE, "Close the browser pane").clicked() {
         close(app);
     }
-    if web && widgets::mini_btn(&mut ui.new_child(egui::UiBuilder::new().max_rect(outside)), icons::EXTERNAL, 28.0, 14.0, "Open in your own browser").clicked() {
+    if web && bar_btn(&mut ui.new_child(egui::UiBuilder::new().max_rect(outside)), icons::EXTERNAL, "Open in your own browser").clicked() {
         ui.ctx().open_url(egui::OpenUrl::new_tab(&url));
     }
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(stretch_at));
     child.add_enabled_ui(has_page, |ui| {
-        if widgets::mini_btn(ui, icons::STRETCH, 28.0, 14.0, "Stretch").clicked() {
+        if bar_btn(ui, icons::STRETCH, "Stretch").clicked() {
             go = Some(Input::Stretch(true));
         }
     });
@@ -189,9 +241,14 @@ fn pane(app: &mut App, ui: &mut egui::Ui, card: Rect, round: f32) {
     let focused = ui.memory(|m| m.has_focus(id));
     ui.painter().rect(field, 8.0, if focused { p.bg2 } else { alpha(p.bg2, 70.0) }, Stroke::new(1.0, if focused { alpha(p.accent, 60.0) } else { p.border }), StrokeKind::Inside);
     if !app.browser.editing {
-        app.browser.address = if url.is_empty() || url == "about:blank" { String::new() } else { url.clone() };
+        app.browser.address = if blank(&url) { String::new() } else { url.clone() };
     }
-    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(field.shrink2(vec2(10.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
+    let words = field.shrink2(vec2(10.0, 0.0));
+    let words = match doing.filter(|_| !focused) {
+        Some(doing) => Rect::from_min_max(words.min, pos2(working(ui, field, &doing), words.bottom())),
+        None => words,
+    };
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(words).layout(egui::Layout::left_to_right(egui::Align::Center)));
     let edit = egui::TextEdit::singleline(&mut app.browser.address).id(id).frame(egui::Frame::NONE).font(theme::mono(12.0)).text_color(p.text2).hint_text("Search or type an address").desired_width(f32::INFINITY);
     let response = child.add(edit);
     app.browser.editing = response.has_focus();
@@ -218,6 +275,53 @@ fn pane(app: &mut App, ui: &mut egui::Ui, card: Rect, round: f32) {
     page(app, ui, view, round, live::WIDEST, true);
 }
 
+fn bar_btn(ui: &mut egui::Ui, icon: icons::Icon, tip: &str) -> egui::Response {
+    let response = widgets::mini_btn(ui, icon, 28.0, 14.0, "");
+    above(&response, tip);
+    response
+}
+
+/// A tip above its button rather than below: below the bar is the page, and nothing drawn shows over a real view.
+fn above(response: &egui::Response, tip: &str) {
+    let mut tooltip = egui::Tooltip::for_enabled(response);
+    tooltip.popup = tooltip.popup.align(egui::RectAlign::TOP).align_alternatives(&[egui::RectAlign::LEFT]);
+    tooltip.show(|ui| ui.label(tip));
+}
+
+/// The agent at work, at the right end of the address field: a pulse and what it is doing ("Clicking “Search”").
+/// Returns where the address's own words must end.
+fn working(ui: &egui::Ui, field: Rect, doing: &str) -> f32 {
+    let p = p();
+    let text = widgets::galley(ui, &clip(doing, 34), theme::font(11.5, W::Medium), p.text2);
+    let width = (text.size().x + 8.0 + 8.0 + 10.0).min(field.width() * 0.6);
+    let pulse = (ui.input(|i| i.time) * 2.4).sin() as f32 * 0.5 + 0.5;
+    let left = field.right() - 10.0 - width;
+    ui.painter().circle_filled(pos2(left + 4.0, field.center().y), 4.0, alpha(p.accent, 55.0 + 45.0 * pulse));
+    let y = field.center().y - text.size().y / 2.0;
+    ui.painter().with_clip_rect(field.shrink(1.0)).galley(pos2(left + 16.0, y), text, p.text2);
+    ui.ctx().request_repaint_after(Duration::from_millis(33));
+    left - 8.0
+}
+
+/// The page as a real view (`live::real`). The view takes its own clicks, wheel and keys, as any browser does, so the
+/// pane only says where it goes. Nothing can be drawn over it: what went wrong takes a row above it, the agent's steps
+/// are told in the bar, and with no page to show the view stays out of sight.
+#[cfg(windows)]
+fn real_page(app: &mut App, ui: &mut egui::Ui, view: Rect, round: f32) {
+    let (mark, error, running, url) = live::with(&app.conv.workspace(), |v| (v.real.clone(), v.error.clone(), v.running, v.url.clone()));
+    let Some(mark) = mark.filter(|_| running && !blank(&url)) else {
+        empty(ui, view, running);
+        return error_strip(ui, view, error.as_deref());
+    };
+    error_strip(ui, view, error.as_deref());
+    let below = if error.is_some() { Rect::from_min_max(pos2(view.left(), view.top() + 30.0), view.max) } else { view };
+    // Edges rounded on their own, so the view meets the card's border on both sides at any width.
+    let k = ui.ctx().pixels_per_point();
+    let (left, top) = ((below.left() * k).round() as i32, (below.top() * k).round() as i32);
+    let at = [left, top, (below.right() * k).round() as i32 - left, (below.bottom() * k).round() as i32 - top];
+    app.browser.place = Some((mark, at, ((round - 1.0).max(0.0) * k).round() as i32));
+}
+
 /// The page over the whole window, below the title bar: no bar, no card, its player filling it. The way back shows at
 /// the top right for a moment after the pointer moves, and Esc takes it too.
 fn stretch_view(app: &mut App, ctx: &egui::Context) {
@@ -227,20 +331,25 @@ fn stretch_view(app: &mut App, ctx: &egui::Context) {
     egui::Area::new(egui::Id::new("browser-stretch")).order(egui::Order::Foreground).fixed_pos(rect.min).show(ctx, |ui| {
         ui.set_clip_rect(rect);
         ui.painter().rect_filled(rect, 0.0, Color32::BLACK);
-        let back = Rect::from_min_size(pos2(rect.right() - 20.0 - 36.0, rect.top() + 20.0), vec2(36.0, 36.0));
+        // A real view takes the pointer and the keys over the page, Esc too, so its way back keeps a row of its own
+        // above it, always shown.
+        let real = live::real();
+        let row = if real { 44.0 } else { 0.0 };
+        let back = if real { Rect::from_center_size(pos2(rect.right() - 20.0 - 18.0, rect.top() + row / 2.0), vec2(36.0, 36.0)) } else { Rect::from_min_size(pos2(rect.right() - 20.0 - 36.0, rect.top() + 20.0), vec2(36.0, 36.0)) };
         // The page takes every press but the one on the way back.
         let over_back = ui.rect_contains_pointer(back.expand(6.0));
-        page(app, ui, rect, 0.0, live::WIDEST_STRETCHED, false);
+        page(app, ui, Rect::from_min_max(pos2(rect.left(), rect.top() + row), rect.max), 0.0, live::WIDEST_STRETCHED, false);
         if ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
             app.browser.stirred = Some(Instant::now());
         }
-        let lately = app.browser.stirred.is_some_and(|at| at.elapsed() < Duration::from_millis(2200));
+        let lately = real || app.browser.stirred.is_some_and(|at| at.elapsed() < Duration::from_millis(2200));
         let shown = ctx.animate_bool_with_time(egui::Id::new("stretch-back"), lately || over_back, 0.2);
-        if lately {
+        if lately && !real {
             ctx.request_repaint_after(Duration::from_millis(120));
         }
         if shown > 0.0 {
-            let hit = ui.interact(back, egui::Id::new("stretch-back-hit"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand).on_hover_text("Back");
+            let hit = ui.interact(back, egui::Id::new("stretch-back-hit"), Sense::click()).on_hover_cursor(CursorIcon::PointingHand);
+            above(&hit, "Back");
             let fill = Color32::from_black_alpha((150.0 * shown) as u8).lerp_to_gamma(Color32::from_white_alpha((60.0 * shown) as u8), if hit.hovered() { 0.35 } else { 0.0 });
             ui.painter().circle(back.center(), 18.0, fill, Stroke::new(1.0, Color32::from_white_alpha((40.0 * shown) as u8)));
             icons::paint(ui, icons::STRETCH_EXIT, back.center(), 16.0, Color32::from_white_alpha((235.0 * shown) as u8));
@@ -257,6 +366,10 @@ fn stretch_view(app: &mut App, ctx: &egui::Context) {
 /// The page itself, at `view`: its frame, the clicks, wheel and keys that go to it, the agent's pointer, and what
 /// went wrong. Shared by the pane and the stretched view.
 fn page(app: &mut App, ui: &mut egui::Ui, view: Rect, round: f32, widest: f32, in_pane: bool) {
+    #[cfg(windows)]
+    if live::real() {
+        return real_page(app, ui, view, round);
+    }
     let p = p();
     let root = app.conv.workspace();
     let key = live::key(&root);
