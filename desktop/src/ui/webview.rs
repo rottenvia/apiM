@@ -71,11 +71,18 @@ impl View {
             })
             .with_additional_browser_args(args)
             .with_autoplay(true)
+            // Made while the user types to the agent, it took the keyboard from the composer.
+            .with_focused(false)
             .with_background_color((22, 22, 22, 255))
             .with_bounds(Rect { position: PhysicalPosition::new(-30_000, 0).into(), size: PhysicalSize::new(1280, 800).into() })
             .build_as_child(&parent)
             .map_err(|e| e.to_string())?;
         Ok(View { view, _context: context, bounds: [-30_000, 0, 1280, 800], corner: 0, opened })
+    }
+
+    /// Gives the keyboard back to apiM's window, from the page if it had it.
+    pub fn focus_parent(&self) {
+        let _ = self.view.focus_parent();
     }
 
     /// Loads the page again, from the view itself: nothing of the agent's is asked (`live::hand_over`).

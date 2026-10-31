@@ -71,6 +71,13 @@ pub fn serve(state: &mut State, ctx: &egui::Context) {
     for (mark, view) in &mut state.views {
         view.place(place.as_ref().filter(|(shown, ..)| shown == mark).map(|(_, at, corner)| (*at, *corner)));
     }
+    // A press on apiM's own UI takes the keyboard back from the page. winit does not move the keyboard on a click, so
+    // after a click in the page, what was then typed in the composer went to the page.
+    if ctx.input(|i| i.pointer.any_pressed()) {
+        if let Some(view) = state.views.values().next() {
+            view.focus_parent();
+        }
+    }
     for mark in live::reloads() {
         if let Some(view) = state.views.get(&mark) {
             view.reload();
