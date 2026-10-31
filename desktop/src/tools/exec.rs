@@ -779,7 +779,7 @@ async fn execute_keeping(ctx: &Ctx, program: &str, argv: Vec<String>, reason: &s
             let so_far = last_chars(&log.lock().unwrap(), 4_000);
             let state = format!("{} goes on running in the background as process {id}: wait_for_output with that id waits for it to end, read_process shows its output, stop_process stops it", launch.display);
             let tail = if so_far.trim().is_empty() { String::new() } else { format!("\n\nOutput so far:\n{so_far}") };
-            return Err(Output::ok(format!("{}{tail}", spoken_while_waiting(started, &state)), "The user said something"));
+            return Err(Output::ok(format!("{}{tail}", spoken_while_waiting(started, &state)), "Still running"));
         }
     };
     let kept = keeper.and_then(|keeper| {
@@ -1434,7 +1434,7 @@ pub async fn wait_for_output(ctx: &Ctx, args: &Value) -> Output {
                 return Output::fail(format!("Timed out after {:.0}s: {} {state}.", limit.as_secs_f64(), watch.name));
             }
             if ctx.spoken_to() {
-                return Output::ok(spoken_while_waiting(started, &format!("{} is still open", watch.name)), "The user said something");
+                return Output::ok(spoken_while_waiting(started, &format!("{} is still open", watch.name)), "Still open");
             }
             tokio::time::sleep(Duration::from_millis(150)).await;
         }
@@ -1467,7 +1467,7 @@ pub async fn wait_for_output(ctx: &Ctx, args: &Value) -> Output {
             "waiting"
         };
         if outcome == "spoken to" {
-            return Output::ok(spoken_while_waiting(started, &format!("the process {id} is still running")), "The user said something");
+            return Output::ok(spoken_while_waiting(started, &format!("the process {id} is still running")), "Still running");
         }
         if outcome != "waiting" {
             let ms = started.elapsed().as_millis();
@@ -1515,7 +1515,7 @@ mod tests {
         let slow = if cfg!(windows) { json!({ "command": "powershell", "args": ["echo booting; Start-Sleep -Seconds 30"], "timeout_ms": 240_000 }) } else { json!({ "command": "sh", "args": ["-c", "echo booting; sleep 30"], "timeout_ms": 240_000 }) };
         let ran = tokio::time::timeout(Duration::from_secs(20), run_command(&ctx, &slow)).await.expect("the command held the question");
         assert!(ran.ok && ran.text.starts_with("Stopped waiting after") && ran.text.contains("background as process p") && ran.text.contains("booting"), "{}", ran.text);
-        assert_eq!(ran.summary, "The user said something");
+        assert_eq!(ran.summary, "Still running");
         // Left running, and tracked like one started in the background.
         let id = ran.text.split_once("as process ").and_then(|(_, rest)| rest.split(':').next()).unwrap_or_default().to_string();
         assert!(ctx.procs.get(&id, &ctx.state_dir).is_some_and(|p| p.exit.lock().unwrap().is_none()), "{id}");
@@ -1540,7 +1540,7 @@ mod tests {
         });
         let waited = tokio::time::timeout(Duration::from_secs(20), wait_for_output(&ctx, &json!({ "id": id, "timeout_ms": 600_000 }))).await.expect("the wait never came back");
         assert!(waited.ok && waited.text.starts_with("Stopped waiting after") && waited.text.contains("is still running"), "{}", waited.text);
-        assert_eq!(waited.summary, "The user said something");
+        assert_eq!(waited.summary, "Still running");
         // The program it watched was left alone.
         assert!(ctx.procs.get(&id, &ctx.state_dir).is_some_and(|p| p.exit.lock().unwrap().is_none()));
         let _ = stop_process(&ctx, &json!({ "id": id }));

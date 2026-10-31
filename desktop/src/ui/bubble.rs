@@ -100,20 +100,27 @@ pub fn dots(ui: &mut Ui, size: f32, colour: Color32) {
 
 /// What the user said while the reply ran, where the reply read it: their own bubble, as any message of theirs, without
 /// a message's hover actions (it is part of the reply, and goes with it).
-fn said_bubble(ui: &mut Ui, text: &str, env: &Env) {
+/// What the user said while the reply ran, as their message: it comes in as a message sent does (`chat::messages`),
+/// up from a little below its place, fading in. `key` holds it through its move from the reply's foot to where the
+/// reply read it, which is another row.
+fn said_bubble(ui: &mut Ui, text: &str, env: &Env, key: egui::Id) {
     let p = p();
     const PAD: egui::Vec2 = vec2(16.0, 10.0);
+    let come = widgets::arrival(ui, key, env.live, 0.25);
+    let drop = (1.0 - come) * 14.0;
     // It went to the model with a note for each file; the bubble keeps the words.
     let body = without_file_notes(text).trim_matches(['\n', '\r']);
     let body = if body.trim().is_empty() { text.trim() } else { body };
     let mut job = egui::text::LayoutJob::simple(body.to_string(), theme::font(15.0, W::Regular), p.text, (env.cap - PAD.x * 2.0).max(80.0));
     job.sections.iter_mut().for_each(|s| s.format.line_height = Some(24.0));
     let galley = ui.painter().layout_job(job);
-    let top = ui.cursor().top();
+    let top = ui.cursor().top() + drop;
     let card = Rect::from_min_max(pos2(env.edge - galley.size().x.max(8.0) - PAD.x * 2.0, top), pos2(env.edge, top + galley.size().y + PAD.y * 2.0));
-    ui.painter().rect_filled(card, 16.0, p.elevated);
-    ui.new_child(egui::UiBuilder::new().max_rect(card.shrink2(PAD))).add(egui::Label::new(galley).selectable(true));
-    ui.allocate_space(vec2(ui.available_width(), card.height()));
+    let mut bubble = ui.new_child(egui::UiBuilder::new().max_rect(card));
+    bubble.multiply_opacity(come);
+    bubble.painter().rect_filled(card, 16.0, p.elevated);
+    bubble.new_child(egui::UiBuilder::new().max_rect(card.shrink2(PAD))).add(egui::Label::new(galley).selectable(true));
+    ui.allocate_space(vec2(ui.available_width(), card.height() - drop));
 }
 
 /// Bytes of a `data:image/png;base64,…` URL.
@@ -1671,7 +1678,7 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
                 if let Some((thought, live)) = think {
                     hung(ui, |ui| think_row(ui, thought, *live, env));
                 } else if let Some((said, true)) = notice {
-                    said_bubble(ui, said, env);
+                    said_bubble(ui, said, env, egui::Id::new(("said", &msg.id, said)));
                 } else if let Some((notice, _)) = notice {
                     // A notice new to the reply unfolds as a step does: the route line came in whole and pushed
                     // "Thinking…" down by two lines in a frame.
@@ -1728,7 +1735,7 @@ fn assistant_body(ui: &mut Ui, msg: &Message, env: &mut Env) {
                 }),
                 Part::Said(said) => ui.push_id(("said", i), |ui| {
                     gap(ui, 12.0);
-                    said_bubble(ui, said, env);
+                    said_bubble(ui, said, env, egui::Id::new(("said", &msg.id, said)));
                 }),
                 _ => continue,
             };
