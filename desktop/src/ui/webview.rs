@@ -78,6 +78,11 @@ impl View {
         Ok(View { view, _context: context, bounds: [-30_000, 0, 1280, 800], corner: 0, opened })
     }
 
+    /// Loads the page again, from the view itself: nothing of the agent's is asked (`live::hand_over`).
+    pub fn reload(&self) {
+        let _ = self.view.reload();
+    }
+
     /// Shows it at `[x, y, w, h]` with its bottom corners `corner` round, as the pane's card is, or puts it out of
     /// sight at the size it had. Called every frame, it also opens a page asked for in a new window.
     pub fn place(&mut self, at: Option<([i32; 4], i32)>) {

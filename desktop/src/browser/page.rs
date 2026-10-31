@@ -174,6 +174,12 @@ const SIGNATURES: [(&str, &str); 12] = [
     (r"incapsula incident id", "Imperva"),
 ];
 
+/// Is the whole page a check for a person (Cloudflare's "Just a moment…"), going by its title and address? A site's
+/// outright "access denied" is not one: nobody can pass it.
+pub fn checks_for_a_person(title: &str, url: &str) -> bool {
+    detect_challenge(title, "").or(url.contains("__cf_chl").then_some("Cloudflare")).is_some_and(|who| who != "an edge block")
+}
+
 /// Does this request bring Cloudflare's check for a person: its widget (Turnstile, on a site's own page, whatever the
 /// page is called) or its whole-page check? Not the quiet script many of its sites load on every page (`/jsd/`), which
 /// asks nothing of anyone.
@@ -282,7 +288,11 @@ pub fn format_session(s: &Session) -> String {
     let mut lines: Vec<String> = Vec::new();
     if let Some(who) = s.blocked {
         lines.push(format!("NOTE: this page is {who}'s anti-bot challenge, not the site's real content. The selectors and text below describe the challenge page, not the site."));
-        lines.push("It turns away browsers that a program drives, so clicking it here only brings it back. The user can pass it: the Browser pane offers to open the page in a window of its own, and once they have and closed it, the page loads here. If this page matters, ask them to; do not click the check or reload it over and over.".into());
+        lines.push(if crate::browser::live::real() {
+            "It turns away browsers that a program drives, so clicking it yourself only brings it back. Once this call ends, apiM lets go of the page in the Browser pane and loads it again with nothing of yours in it, for the user to pass as in any browser; it is yours again once the check is passed. If this page matters, ask the user to pass it and tell you, then browse again; do not click the check or reload it over and over."
+        } else {
+            "It turns away browsers that a program drives, so clicking it here only brings it back. The user can pass it: the Browser pane offers to open the page in a window of its own, and once they have and closed it, the page loads here. If this page matters, ask them to; do not click the check or reload it over and over."
+        }.into());
         lines.push("The raw page data below is still available — proceed with the task however you judge best.".into());
         lines.push(String::new());
     }
@@ -451,7 +461,8 @@ pub struct Page {
 impl Page {
     /// Open a blank page on the browser and turn on the events and the request check. `subscribe` gives the page its
     /// share of the browser's events once its session is known. With `view`, the page is the pane's real view that the
-    /// UI made at that address (`live::real`), rather than a new one.
+    /// UI made at that address (`live::real`), rather than a new one; or, taken back from the user, it is the view's
+    /// target id (`live::hand_over`).
     pub async fn open(cdp: Cdp, subscribe: impl FnOnce(&str) -> mpsc::UnboundedReceiver<Value>, root: Option<PathBuf>, view: Option<&str>) -> Result<Page, String> {
         let target = match view {
             Some(mark) => find(&cdp, mark).await?,
@@ -474,6 +485,10 @@ impl Page {
             // Every window believes it has the focus, so a site that pauses when it loses it plays on for the agent.
             let _ = cdp.call("Emulation.setFocusEmulationEnabled", json!({ "enabled": true }), Some(&sid)).await;
             cdp.call("Page.addScriptToEvaluateOnNewDocument", json!({ "source": crate::browser::live::MEDIA_JS }), Some(&sid)).await?;
+            // A view taken back from the user has a document already, which the script above does not reach.
+            if view.is_some() {
+                let _ = cdp.call("Runtime.evaluate", json!({ "expression": crate::browser::live::MEDIA_JS }), Some(&sid)).await;
+            }
             // Every request pauses here, so a non-public address is refused before the browser opens it.
             cdp.call("Fetch.enable", json!({ "patterns": [{ "urlPattern": "*" }] }), Some(&sid)).await?;
             Ok::<_, String>((sid, events))
@@ -510,7 +525,11 @@ impl Page {
         &self.sid
     }
 
-    fn root(&self) -> Option<PathBuf> {
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+
+    pub(super) fn root(&self) -> Option<PathBuf> {
         self.root.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
@@ -527,6 +546,13 @@ impl Page {
             return Ok(());
         }
         self.cdp.call("Target.closeTarget", json!({ "targetId": self.target }), None).await.map(|_| ())
+    }
+
+    /// Lets go of the page and leaves it open. Its events, its request check and the scripts put into its documents
+    /// go with the connection, so what loads next is as in any browser (`live::hand_over`).
+    pub async fn detach(&self) {
+        self.alive.store(false, std::sync::atomic::Ordering::SeqCst);
+        let _ = self.cdp.call("Target.detachFromTarget", json!({ "sessionId": self.sid }), None).await;
     }
 
     /// Frames of the page as it is drawn, for the Browser pane (`live::frame`).
@@ -768,7 +794,7 @@ async fn find(cdp: &Cdp, mark: &str) -> Result<String, String> {
     let started = Instant::now();
     loop {
         let all = cdp.call("Target.getTargets", json!({}), None).await?;
-        let found = all["targetInfos"].as_array().into_iter().flatten().find(|t| t["type"] == "page" && t["url"] == mark);
+        let found = all["targetInfos"].as_array().into_iter().flatten().find(|t| t["type"] == "page" && (t["url"] == mark || t["targetId"] == mark));
         if let Some(id) = found.and_then(|t| t["targetId"].as_str()) {
             return Ok(id.to_string());
         }
@@ -947,6 +973,14 @@ mod tests {
     fn shell_needs_scripts_and_an_empty_mount() {
         assert!(looks_like_app_shell(r#"<body><div id="root"></div><script src="x.js"></script></body>"#, ""));
         assert!(!looks_like_app_shell(r#"<body><div id="root"></div></body>"#, ""));
+    }
+
+    #[test]
+    fn a_whole_page_check_for_a_person_is_told_by_its_title_or_address() {
+        assert!(checks_for_a_person("Just a moment...", "https://wiki.example.com/Boss"));
+        assert!(checks_for_a_person("", "https://wiki.example.com/Boss?__cf_chl_rt_tk=abc"));
+        assert!(!checks_for_a_person("Boss | Wiki", "https://wiki.example.com/Boss"));
+        assert!(!checks_for_a_person("Access denied | error 1020", "https://wiki.example.com/"), "nobody can pass an outright block");
     }
 
     #[test]

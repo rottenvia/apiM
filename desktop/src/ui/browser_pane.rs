@@ -71,6 +71,11 @@ pub fn serve(state: &mut State, ctx: &egui::Context) {
     for (mark, view) in &mut state.views {
         view.place(place.as_ref().filter(|(shown, ..)| shown == mark).map(|(_, at, corner)| (*at, *corner)));
     }
+    for mark in live::reloads() {
+        if let Some(view) = state.views.get(&mark) {
+            view.reload();
+        }
+    }
 }
 
 /// No page to show: none yet, or the blank one a page starts on (a real view's carries its mark after the `#`).
@@ -193,9 +198,11 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui, beside: f32, right_gap: f32, top_
 fn pane(app: &mut App, ui: &mut egui::Ui, card: Rect, round: f32) {
     let p = p();
     ui.painter().rect(card, round, p.bg, Stroke::new(1.0, alpha(p.border, 70.0)), StrokeKind::Inside);
+    let handed = live::handed(&app.conv.workspace());
     let (url, loading, has_page, doing) = live::with(&app.conv.workspace(), |v| {
         // What the agent is doing, told in the bar over a real view, where nothing can be drawn on the page.
         let doing = (live::real() && v.driving > 0).then(|| v.pointer.as_ref().filter(|p| p.when.elapsed() < Duration::from_secs(3)).map_or_else(|| "apiM is browsing".to_string(), |p| p.what.clone()));
+        let doing = doing.or(handed.then(|| "Your turn: pass the check".to_string()));
         (v.url.clone(), v.loading, v.running && (v.size[0] > 0 || (live::real() && !blank(&v.url))), doing)
     });
 
@@ -462,7 +469,7 @@ fn page(app: &mut App, ui: &mut egui::Ui, view: Rect, round: f32, widest: f32, i
 fn window_note(ui: &mut egui::Ui, view: Rect, url: &str, title: &str, check: bool) -> bool {
     let host = url.split("://").nth(1).and_then(|rest| rest.split(['/', '?', '#']).next()).unwrap_or("");
     // A check a person can pass; a site's outright "access denied" is not one.
-    let check = check || crate::browser::page::detect_challenge(title, "").or(url.contains("__cf_chl").then_some("Cloudflare")).is_some_and(|who| who != "an edge block");
+    let check = check || crate::browser::page::checks_for_a_person(title, url);
     let (head, body, label) = if host == "accounts.google.com" {
         ("Google won't sign you in here", "It turns away browsers that a program drives, like this one.\nSign in in a window of its own: close it when you're done, and the pane is signed in too.", "Open a sign-in window")
     } else if check {

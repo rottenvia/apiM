@@ -17,7 +17,7 @@
 //! the headless browser every click was put in by apiM, and Cloudflare's check asked again and again (2026-10-31).
 
 use super::cdp::Cdp;
-use super::page::Page;
+use super::page::{Page, checks_for_a_person};
 use super::Browser;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet};
@@ -66,6 +66,11 @@ pub struct View {
     /// The address the chat's real view was made at (`real`), which finds it among the browser's pages. The UI keeps a
     /// view for each, and lets it go when this does.
     pub real: Option<String>,
+    /// The page is the user's while they pass a check for a person (`hand_over`): its target, to take it back by, and
+    /// the chat's workspace, which the page is opened with.
+    handed: Option<(String, PathBuf)>,
+    /// The UI is to load the real view again, as it is now: with nothing of the agent's in it.
+    reload: bool,
 }
 
 /// One move of the agent's pointer, in the page's CSS pixels.
@@ -111,6 +116,20 @@ pub fn real() -> bool {
 pub fn marks() -> Vec<String> {
     VIEWS.lock().unwrap_or_else(|e| e.into_inner()).values().filter_map(|v| v.real.clone()).collect()
 }
+
+/// The real views to load again (`reload`), asked once each.
+pub fn reloads() -> Vec<String> {
+    let mut all = VIEWS.lock().unwrap_or_else(|e| e.into_inner());
+    all.values_mut().filter_map(|v| if std::mem::take(&mut v.reload) { v.real.clone() } else { None }).collect()
+}
+
+/// The page is the user's to pass a check for a person on (`hand_over`), for the bar to say so.
+pub fn handed(root: &Path) -> bool {
+    with(root, |v| v.handed.is_some())
+}
+
+/// What a step meets while the page is the user's: what to do, for the agent.
+const HANDED: &str = "The user is passing a check for a person in the Browser pane, so apiM has let go of the page until it is passed. Ask them to tell you when it is, then browse again.";
 
 /// The UI could not make the view at `mark`: the chat says why, and the view is not asked for again.
 pub fn unmade(mark: &str, why: String) {
@@ -186,6 +205,12 @@ fn part_of(url: &str, path: &Path) -> bool {
 /// A chat's page, opened on first use; the browser is started with the first page. A page whose browser died is
 /// replaced. A file on it may come only from `root`, the chat's workspace.
 pub async fn page(root: &Path) -> Result<Arc<Page>, String> {
+    open(root, false).await
+}
+
+/// `page`, for the agent or for the user's own step in the pane (`take_back`), which ends a hand-over (`hand_over`)
+/// even with the check still on the page.
+async fn open(root: &Path, take_back: bool) -> Result<Arc<Page>, String> {
     let key = key(root);
     let mut session = SESSION.lock().await;
     if in_window_now() {
@@ -194,6 +219,10 @@ pub async fn page(root: &Path) -> Result<Arc<Page>, String> {
     if session.as_ref().is_some_and(|s| !s.alive.load(Ordering::SeqCst)) {
         *session = None;
         forget_all();
+    }
+    let handed = with_key(&key, |v| v.handed.clone().map(|(target, _)| (target, checks_for_a_person(&v.title, &v.url))));
+    if handed.as_ref().is_some_and(|(_, check)| *check && !take_back) {
+        return Err(HANDED.to_string());
     }
     // The chat's real view, asked of the UI: it is made on the next frame. The process's number keeps two apiMs on one
     // data folder, whose views share one browser, from finding each other's.
@@ -205,6 +234,10 @@ pub async fn page(root: &Path) -> Result<Arc<Page>, String> {
     });
     if session.is_none() {
         let (browser, events) = if real() { super::views().await? } else { super::launch().await? };
+        // What the browser says of its pages, attached or not (`target_changed`).
+        if real() {
+            browser.cdp.call("Target.setDiscoverTargets", json!({ "discover": true }), None).await?;
+        }
         let subs: Arc<StdMutex<HashMap<String, mpsc::UnboundedSender<Value>>>> = Default::default();
         let alive = Arc::new(AtomicBool::new(true));
         tokio::spawn(route(events, subs.clone(), alive.clone()));
@@ -222,11 +255,18 @@ pub async fn page(root: &Path) -> Result<Arc<Page>, String> {
         subs.lock().unwrap_or_else(|e| e.into_inner()).insert(sid.to_string(), tx);
         rx
     };
-    let page = Arc::new(Page::open(shared.browser.cdp.clone(), subscribe, Some(root.to_path_buf()), mark.as_deref()).await?);
+    // Taken back from the user, the view is found by its target: it is no longer at the address it was made at.
+    let back = handed.is_some();
+    let find = handed.map(|(target, _)| target).or(mark.clone());
+    let page = Arc::new(Page::open(shared.browser.cdp.clone(), subscribe, Some(root.to_path_buf()), find.as_deref()).await?);
     SIDS.lock().unwrap_or_else(|e| e.into_inner()).insert(page.sid().to_string(), key.clone());
     shared.pages.insert(key.clone(), page.clone());
     with_key(&key, |v| {
+        let shown = (std::mem::take(&mut v.url), std::mem::take(&mut v.title));
         reset(v);
+        if back {
+            (v.url, v.title) = shown;
+        }
         (v.running, v.error, v.last_used, v.viewport, v.real) = (true, None, Some(Instant::now()), VIEWPORT, mark);
     });
     if STREAMED.lock().unwrap_or_else(|e| e.into_inner()).as_deref() == Some(key.as_str()) {
@@ -246,7 +286,11 @@ pub fn moved(from: &Path, to: &Path) {
     }
     {
         let mut views = VIEWS.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(v) = views.remove(&old) {
+        if let Some(mut v) = views.remove(&old) {
+            // A page the user has is taken back under the new name.
+            if let Some((_, root)) = &mut v.handed {
+                *root = to.to_path_buf();
+            }
             views.insert(new.clone(), v);
         }
     }
@@ -285,6 +329,9 @@ async fn open_page(key: &str) -> Option<Arc<Page>> {
 /// Hands each event to the page whose session it names.
 async fn route(mut events: mpsc::UnboundedReceiver<Value>, subs: Arc<StdMutex<HashMap<String, mpsc::UnboundedSender<Value>>>>, alive: Arc<AtomicBool>) {
     while let Some(ev) = events.recv().await {
+        if ev["method"] == "Target.targetInfoChanged" {
+            target_changed(&ev["params"]["targetInfo"]);
+        }
         let Some(sid) = ev["sessionId"].as_str() else { continue };
         let tx = subs.lock().unwrap_or_else(|e| e.into_inner()).get(sid).cloned();
         if let Some(tx) = tx {
@@ -301,6 +348,7 @@ async fn route(mut events: mpsc::UnboundedReceiver<Value>, subs: Arc<StdMutex<Ha
 /// and its last frame, and a mouse move over that frame opened a page again. A real view is let go with it.
 fn reset(v: &mut View) {
     (v.running, v.rgba, v.size, v.url, v.title, v.check, v.loading, v.pointer, v.media, v.real) = (false, Arc::default(), [0, 0], String::new(), String::new(), false, false, None, None, None);
+    (v.handed, v.reload) = (None, false);
     v.seq += 1;
 }
 
@@ -349,6 +397,69 @@ pub async fn discard(root: &Path) {
     }
     with_key(&key, reset);
     wake();
+}
+
+/// A check for a person fills the page (Cloudflare's "Just a moment…"), and nobody is driving: the agent lets go of the
+/// page, and it loads again with nothing of the agent's in it, for the user to pass as in any browser. Driven, the
+/// check turned the user away however they clicked, round and round (2026-10-31): it looks for a program at the
+/// controls, and the agent's connection was there, with its events, request check and scripts in the page. The same
+/// check came up in a plain browser window too, so it is the site's to ask; it is only the answer that changes. The
+/// page is taken back once it has moved on (`target_changed`), or by the user's own step in the pane.
+async fn hand_over(key: String) {
+    let mut session = SESSION.lock().await;
+    let Some(shared) = session.as_mut() else { return };
+    // Asked for a moment ago: by now a step may have started, or the page moved on.
+    if !with_key(&key, |v| v.driving == 0 && v.handed.is_none() && checks_for_a_person(&v.title, &v.url)) {
+        return;
+    }
+    let Some(page) = shared.pages.remove(&key) else { return };
+    shared.subs.lock().unwrap_or_else(|e| e.into_inner()).remove(page.sid());
+    SIDS.lock().unwrap_or_else(|e| e.into_inner()).remove(page.sid());
+    page.detach().await;
+    let root = page.root().unwrap_or_else(|| PathBuf::from(&key));
+    with_key(&key, |v| (v.handed, v.reload, v.loading, v.pointer) = (Some((page.target().to_string(), root)), true, false, None));
+    wake();
+}
+
+/// The page on show is a check for a person and nobody is driving it: it goes to the user (`hand_over`).
+fn hand_over_if_checked(key: &str) {
+    if real() && with_key(key, |v| v.running && v.driving == 0 && v.handed.is_none() && checks_for_a_person(&v.title, &v.url)) {
+        spawn(hand_over(key.to_string()));
+    }
+}
+
+/// What the browser says of a page (`Target.targetInfoChanged`), attached or not. A page the user has (`hand_over`) is
+/// followed by it, and taken back once it is past the check: when, 1.5 s after a new document, it has a title of its
+/// own. While the check loads again its title is its address for a moment, and taken back then, the page would go
+/// straight back to being a driven one.
+fn target_changed(info: &Value) {
+    let target = info["targetId"].as_str().unwrap_or("").to_string();
+    let mut changed = None;
+    for (key, v) in VIEWS.lock().unwrap_or_else(|e| e.into_inner()).iter_mut() {
+        if v.handed.as_ref().is_some_and(|(t, _)| *t == target) {
+            (v.url, v.title) = (info["url"].as_str().unwrap_or("").to_string(), info["title"].as_str().unwrap_or("").to_string());
+            changed = Some(key.clone());
+        }
+    }
+    let Some(key) = changed else { return };
+    wake();
+    spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        // Its title is asked for: the browser tells of a new document, not of the title it is given after.
+        let Some(cdp) = SESSION.lock().await.as_ref().map(|s| s.browser.cdp.clone()) else { return };
+        let Ok(all) = cdp.call("Target.getTargets", json!({}), None).await else { return };
+        let Some(now) = all["targetInfos"].as_array().into_iter().flatten().find(|t| t["targetId"] == target.as_str()).cloned() else { return };
+        let root = with_key(&key, |v| {
+            let (_, root) = v.handed.clone().filter(|(t, _)| *t == target)?;
+            (v.url, v.title) = (now["url"].as_str().unwrap_or("").to_string(), now["title"].as_str().unwrap_or("").to_string());
+            let titled = !v.title.trim().is_empty() && !v.url.contains(v.title.trim());
+            (titled && !checks_for_a_person(&v.title, &v.url)).then_some(root)
+        });
+        wake();
+        if let Some(root) = root {
+            let _ = page(&root).await;
+        }
+    });
 }
 
 /// Set while the pane's profile is open in a window of its own: a browser started on the profile then would hand
@@ -442,6 +553,8 @@ impl Drop for Driving {
             v.driving = v.driving.saturating_sub(1);
             v.last_used = Some(Instant::now());
         });
+        // A step that ended on a check for a person leaves it to the user.
+        hand_over_if_checked(&self.0);
         wake();
     }
 }
@@ -507,7 +620,13 @@ pub async fn act(root: &Path, input: Input) {
     if matches!(input, Input::Stretch(false)) && open_page(&key).await.is_none() {
         return;
     }
-    let page = match page(root).await {
+    // A check the user is passing is loaded again as it is, without taking it back. Any other step of theirs ends it.
+    // ponytail: Back and Forward take the page back too; they could go through the view instead, as Reload does.
+    if matches!(input, Input::Reload) && with_key(&key, |v| v.handed.is_some()) {
+        with_key(&key, |v| v.reload = true);
+        return wake();
+    }
+    let page = match open(root, true).await {
         Ok(p) => p,
         Err(e) => {
             with_key(&key, |v| v.error = Some(e));
@@ -537,7 +656,8 @@ pub async fn act(root: &Path, input: Input) {
             page.raw("Runtime.evaluate", json!({ "expression": if on { STRETCH_JS } else { UNSTRETCH_JS }, "returnByValue": true })).await.map(|_| ())
         }
     };
-    with_key(&key, |v| v.error = done.err());
+    // A step that went to a check, which went to the user meanwhile, did not go wrong.
+    with_key(&key, |v| v.error = done.err().filter(|_| v.handed.is_none()));
     wake();
 }
 
@@ -702,8 +822,10 @@ pub(super) fn frame(cdp: &Cdp, sid: &str, params: &Value) {
 /// untouched, so they are asked for again.
 pub(super) fn navigated(sid: &str, url: Option<&str>, loading: Option<bool>, title: Option<String>) {
     with_sid(sid, |v| {
+        // A new document: the last one's title is not its own, and a check for a person was told by it.
         if let Some(url) = url {
             v.url = url.to_string();
+            v.title.clear();
             v.media = None;
             v.check = false;
         }
@@ -714,6 +836,9 @@ pub(super) fn navigated(sid: &str, url: Option<&str>, loading: Option<bool>, tit
             v.title = title;
         }
     });
+    if let Some(key) = SIDS.lock().unwrap_or_else(|e| e.into_inner()).get(sid).cloned() {
+        hand_over_if_checked(&key);
+    }
     // A stream started on the blank page before the first address loaded sometimes never sent a frame: the page moved
     // to another renderer, and a page that does not move paints no more. Asked again, it sends one.
     if loading == Some(false) {
