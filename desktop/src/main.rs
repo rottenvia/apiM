@@ -16,6 +16,7 @@ mod filetree;
 mod find;
 mod git_agent;
 mod github;
+mod guard;
 mod github_app;
 mod lessons;
 mod local;

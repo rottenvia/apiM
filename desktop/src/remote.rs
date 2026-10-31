@@ -240,6 +240,12 @@ pub enum Command {
     More,
     /// A `Picture`'s bytes, sent back to the phones as an `image` frame (`Remote::give`).
     Image { id: String },
+    /// Guardian only (the service on the guardian port, `guard`): launch apiM if it is not running. apiM itself,
+    /// already up to receive this, does nothing with it.
+    Wake,
+    /// Guardian only: the phone's protection flag. On → the guardian relaunches apiM whenever it is killed; off →
+    /// it stands down. Flipped only from the phone.
+    Lock { on: bool },
 }
 
 /// A photo or a file from the phone.

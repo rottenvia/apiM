@@ -206,6 +206,10 @@ fn act(app: &mut App, command: Command) {
                 link.give(id, found);
             }
         }
+        // Guardian concerns, reaching the phone through the guardian's own port, not this one. apiM is already up,
+        // so Wake does nothing here; the lock flag is written only by the guardian (SYSTEM), so a user-level virus
+        // cannot flip it off, and apiM never writes it.
+        Command::Wake | Command::Lock { .. } => {}
     }
 }
 
@@ -526,6 +530,78 @@ pub fn settings(app: &mut App, ui: &mut Ui) {
     form::note(
         ui,
         "The first time, Windows may ask whether apiM can use the network: allow it on private networks, or the phone cannot reach it. The phone and this computer must be on the same Wi-Fi, or both on Tailscale to reach it from anywhere.",
+    );
+    #[cfg(windows)]
+    protection(app, ui);
+}
+
+/// The guardian exe next to this one, when it was built and shipped alongside apiM.
+#[cfg(windows)]
+fn guardian_exe() -> Option<PathBuf> {
+    let path = std::env::current_exe().ok()?.parent()?.join("guardian.exe");
+    path.exists().then_some(path)
+}
+
+/// Runs the guardian with admin rights through a UAC prompt (install and uninstall both need it). True when the
+/// prompt was accepted and the process started.
+#[cfg(windows)]
+fn elevate(file: &std::path::Path, params: &str) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    #[link(name = "shell32")]
+    unsafe extern "system" {
+        fn ShellExecuteW(hwnd: isize, op: *const u16, file: *const u16, params: *const u16, dir: *const u16, show: i32) -> isize;
+    }
+    let wide = |s: &std::ffi::OsStr| s.encode_wide().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    let (op, file, params) = (wide(std::ffi::OsStr::new("runas")), wide(file.as_os_str()), wide(std::ffi::OsStr::new(params)));
+    // Over 32 is success; a cancelled UAC comes back as an error code at or below it.
+    unsafe { ShellExecuteW(0, op.as_ptr(), file.as_ptr(), params.as_ptr(), std::ptr::null(), 1) > 32 }
+}
+
+/// The phone-lock guardian: install/remove the LocalSystem service, and show whether the phone has it locked.
+#[cfg(windows)]
+fn protection(app: &mut App, ui: &mut Ui) {
+    let p = p();
+    let Some(guardian) = guardian_exe() else { return };
+    ui.add_space(20.0);
+    form::label(ui, "Protection (phone lock)", "");
+    ui.add_space(8.0);
+    form::helper(
+        ui,
+        &[Seg::T(
+            "A background guardian keeps apiM reachable from your phone even when it is closed, and — once you turn the lock on from the phone — relaunches apiM if anything kills it, so a user-level virus cannot get rid of it. Installing it needs one Windows admin prompt.",
+        )],
+    );
+    ui.add_space(10.0);
+    let installed = crate::guard::pointer_path().exists();
+    let locked = crate::guard::read_lock().locked;
+    let status = if !installed {
+        "Not installed".to_string()
+    } else if locked {
+        "Installed · locked from your phone".to_string()
+    } else {
+        "Installed · unlocked".to_string()
+    };
+    form::line(ui, &status, 12.0, 18.0, W::Medium, if locked { p.success } else { p.text2 });
+    ui.add_space(10.0);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        let label = if installed { "Reinstall guardian" } else { "Install guardian" };
+        if widgets::small_btn(ui, label, p.text, p.bg3, p.border).on_hover_text("Registers a LocalSystem service that starts at boot. A Windows admin prompt appears.").clicked() {
+            let params = format!("install --apim \"{}\" --data \"{}\" --port {}", std::env::current_exe().unwrap_or_default().display(), store::data_dir().display(), port());
+            if elevate(&guardian, &params) {
+                app.toast("Approve the Windows prompt to install the guardian. It starts with Windows from now on.");
+            } else {
+                app.toast("The guardian install was cancelled or blocked.");
+            }
+        }
+        if installed && widgets::small_btn(ui, "Remove guardian", p.danger, Color32::TRANSPARENT, alpha(p.danger, 40.0)).on_hover_text("Stops and deletes the service. A Windows admin prompt appears.").clicked() && elevate(&guardian, "uninstall") {
+            app.toast("Approve the Windows prompt to remove the guardian.");
+        }
+    });
+    ui.add_space(10.0);
+    form::note(
+        ui,
+        "The lock turns on and off only from the phone. While it is on, closing apiM on this PC brings it back; turn the lock off on the phone to close it for good. Against a virus that already holds admin or SYSTEM, no app can stay unkillable — keep Windows UAC on.",
     );
 }
 

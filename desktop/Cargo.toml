@@ -41,6 +41,17 @@ qrcodegen = "1.8"
 # A real browser view in the Browser pane (`ui::webview`): WebView2, part of Windows 11. The handle crate is already in the tree.
 wry = "0.57"
 raw-window-handle = "0.6"
+# The guardian service (`src/bin/guardian.rs`): the SCM lifecycle (install, control handler, restart-on-kill recovery),
+# and the raw Win32 to launch apiM into the logged-in user's session from session 0 and wait on its process.
+windows-service = "0.7"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Environment",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_Security",
+] }
 
 [profile.dev.package."*"]
 opt-level = 2
