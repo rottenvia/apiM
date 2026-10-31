@@ -42,6 +42,8 @@ pub struct View {
     pub seq: u64,
     pub url: String,
     pub title: String,
+    /// The page asked Cloudflare to check for a person (`page::asks_for_a_person`): its title need not say so.
+    pub check: bool,
     pub loading: bool,
     /// The page's layout size in CSS pixels, which the pane's clicks are mapped into.
     pub viewport: (u32, u32),
@@ -155,8 +157,8 @@ fn part_of(url: &str, path: &Path) -> bool {
 pub async fn page(root: &Path) -> Result<Arc<Page>, String> {
     let key = key(root);
     let mut session = SESSION.lock().await;
-    if signing_in() {
-        return Err("The user is signing in to a site in a window of this browser's own. The browser is back once they close that window.".to_string());
+    if in_window_now() {
+        return Err("The user has this browser's pages open in a window of its own, to sign in or to pass a site's check for a person. The browser is back once they close that window.".to_string());
     }
     if session.as_ref().is_some_and(|s| !s.alive.load(Ordering::SeqCst)) {
         *session = None;
@@ -259,7 +261,7 @@ async fn route(mut events: mpsc::UnboundedReceiver<Value>, subs: Arc<StdMutex<Ha
 /// A view whose page is gone: no picture, no address, nothing loading. A page discarded mid-load kept its progress bar
 /// and its last frame, and a mouse move over that frame opened a page again.
 fn reset(v: &mut View) {
-    (v.running, v.rgba, v.size, v.url, v.title, v.loading, v.pointer, v.media) = (false, Arc::default(), [0, 0], String::new(), String::new(), false, None, None);
+    (v.running, v.rgba, v.size, v.url, v.title, v.check, v.loading, v.pointer, v.media) = (false, Arc::default(), [0, 0], String::new(), String::new(), false, false, None, None);
     v.seq += 1;
 }
 
@@ -310,46 +312,56 @@ pub async fn discard(root: &Path) {
     wake();
 }
 
-/// Set while the pane's profile is open in a window for the user to sign in: a browser started on the profile then
-/// would hand itself over to that window and quit.
-static SIGNING_IN: AtomicBool = AtomicBool::new(false);
+/// Set while the pane's profile is open in a window of its own: a browser started on the profile then would hand
+/// itself over to that window and quit.
+static IN_WINDOW: AtomicBool = AtomicBool::new(false);
 
-pub fn signing_in() -> bool {
-    SIGNING_IN.load(Ordering::SeqCst)
+pub fn in_window_now() -> bool {
+    IN_WINDOW.load(Ordering::SeqCst)
 }
 
-/// Google turns away a sign-in from a browser that a program drives, and the pane's is one. So the pane's profile is
-/// opened in an ordinary window of the same browser, nothing driving it, and the user signs in there. Once they close
-/// it the pane starts again on that profile, signed in, at the page the sign-in was for.
-pub async fn sign_in(root: PathBuf, url: String) {
-    if SIGNING_IN.swap(true, Ordering::SeqCst) {
+/// Google's sign-in and a site's check for a person (Cloudflare's) turn away a browser that a program drives, and the
+/// pane's is one. So the pane's profile is opened in an ordinary window of the same browser, nothing driving it, and the
+/// user signs in or passes the check there. Once they close it the pane starts again on that profile, where what they
+/// did holds, at the page it was for.
+pub async fn in_window(root: PathBuf, url: String) {
+    if IN_WINDOW.swap(true, Ordering::SeqCst) {
         return;
     }
     // Held until the browser is gone, so no page opens on the profile meanwhile.
     end(&mut *SESSION.lock().await).await;
-    let then = signed_in_at(&url);
+    let then = after_window(&url);
     match super::open_window(&url) {
         Ok(mut window) => {
             let _ = tokio::task::spawn_blocking(move || window.wait()).await;
-            SIGNING_IN.store(false, Ordering::SeqCst);
+            IN_WINDOW.store(false, Ordering::SeqCst);
             act(&root, Input::Go(then)).await;
         }
         Err(e) => {
-            SIGNING_IN.store(false, Ordering::SeqCst);
+            IN_WINDOW.store(false, Ordering::SeqCst);
             with(&root, |v| v.error = Some(e));
             wake();
         }
     }
 }
 
-/// Where a sign-in goes on to once it is done: Google's sign-in page names it in `continue`. Only a web page; anything
-/// else, the sign-in page itself.
-fn signed_in_at(url: &str) -> String {
-    url::Url::parse(url)
-        .ok()
-        .and_then(|u| u.query_pairs().find(|(k, _)| k == "continue").map(|(_, to)| to.into_owned()))
-        .filter(|to| to.starts_with("https://") || to.starts_with("http://"))
-        .unwrap_or_else(|| url.to_string())
+/// Where the pane goes once the window is closed. A sign-in goes on to the page Google's sign-in names in `continue`
+/// (only a web page); a page that was behind Cloudflare's check loses the check's own `__cf_chl_…` marks.
+fn after_window(url: &str) -> String {
+    let Ok(mut parsed) = url::Url::parse(url) else { return url.to_string() };
+    if let Some(to) = parsed.query_pairs().find(|(k, _)| k == "continue").map(|(_, to)| to.into_owned()).filter(|to| to.starts_with("https://") || to.starts_with("http://")) {
+        return to;
+    }
+    let kept: Vec<(String, String)> = parsed.query_pairs().filter(|(k, _)| !k.starts_with("__cf_chl")).map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
+    if parsed.query_pairs().count() == kept.len() {
+        return url.to_string();
+    }
+    if kept.is_empty() {
+        parsed.set_query(None);
+    } else {
+        parsed.query_pairs_mut().clear().extend_pairs(kept);
+    }
+    parsed.to_string()
 }
 
 fn watch_idle() {
@@ -447,8 +459,8 @@ const UNSTRETCH_JS: &str = r#"(() => {
 
 /// Runs a user's action on a chat's page. Errors land in the view for the pane to show.
 pub async fn act(root: &Path, input: Input) {
-    // The pane says what is going on meanwhile (`signing_in`); a click on it would only start nothing.
-    if signing_in() {
+    // The pane says what is going on meanwhile (`in_window_now`); a click on it would only start nothing.
+    if in_window_now() {
         return;
     }
     let key = key(root);
@@ -617,6 +629,15 @@ pub(super) fn pointer(sid: &str, x: f64, y: f64, what: String, click: bool) {
     wake();
 }
 
+/// The page sent for Cloudflare's check for a person.
+pub(super) fn checked(sid: &str) {
+    let mut fresh = false;
+    with_sid(sid, |v| fresh = !std::mem::replace(&mut v.check, true));
+    if fresh {
+        wake();
+    }
+}
+
 /// The frame the page sent, decoded off the UI thread.
 pub(super) fn frame(cdp: &Cdp, sid: &str, params: &Value) {
     let ack = params["sessionId"].clone();
@@ -645,6 +666,7 @@ pub(super) fn navigated(sid: &str, url: Option<&str>, loading: Option<bool>, tit
         if let Some(url) = url {
             v.url = url.to_string();
             v.media = None;
+            v.check = false;
         }
         if let Some(loading) = loading {
             v.loading = loading;
@@ -705,10 +727,14 @@ mod tests {
 
     #[test]
     fn a_sign_in_goes_on_to_the_page_it_was_for() {
-        assert_eq!(signed_in_at("https://accounts.google.com/v3/signin/identifier?continue=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3Dx&hl=en"), "https://www.youtube.com/watch?v=x");
+        assert_eq!(after_window("https://accounts.google.com/v3/signin/identifier?continue=https%3A%2F%2Fwww.youtube.com%2Fwatch%3Fv%3Dx&hl=en"), "https://www.youtube.com/watch?v=x");
         let odd = "https://accounts.google.com/signin?continue=javascript:alert(1)";
-        assert_eq!(signed_in_at(odd), odd);
-        assert_eq!(signed_in_at("https://accounts.google.com/signin"), "https://accounts.google.com/signin");
+        assert_eq!(after_window(odd), odd);
+        assert_eq!(after_window("https://accounts.google.com/signin"), "https://accounts.google.com/signin");
+        // Past Cloudflare's check, the page itself, without the check's marks.
+        assert_eq!(after_window("https://stats.example.com/players?id=7&__cf_chl_rt_tk=abc.def-123"), "https://stats.example.com/players?id=7");
+        assert_eq!(after_window("https://stats.example.com/?__cf_chl_tk=x&__cf_chl_f_tk=y"), "https://stats.example.com/");
+        assert_eq!(after_window("https://stats.example.com/a?b=1"), "https://stats.example.com/a?b=1");
     }
 
     #[test]

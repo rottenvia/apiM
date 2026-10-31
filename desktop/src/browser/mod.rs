@@ -20,7 +20,19 @@ use tokio::sync::mpsc;
 /// ponytail: it names an npm command this desktop does not have. Reword once the desktop has a setup step.
 pub const NOT_INSTALLED: &str = "No browser was found on this computer. Install Microsoft Edge, Chrome, Chromium, Brave or Thorium, or point APIM_BROWSER_PATH at one, and this works.";
 
-const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
+/// What the headless browser calls itself: what the same browser says in a window of its own. A site's check for a
+/// person (Cloudflare's) is passed in such a window (`live::in_window`), and the pass holds only for the browser that
+/// earned it, by this name. It was a fixed "Chrome/131" on a Thorium 138: a check passed in the window never held in the
+/// pane, and the version it named was not the one the browser's other headers gave.
+fn user_agent(exe: &Path) -> String {
+    // Each version of a Chromium-family browser is installed in a folder named for it, beside the program.
+    let version = |name: &str| name.split('.').map(|n| n.parse::<u32>().ok()).collect::<Option<Vec<u32>>>().filter(|v| v.len() == 4);
+    let newest = exe.parent().and_then(|dir| std::fs::read_dir(dir).ok()).into_iter().flatten().flatten().filter_map(|entry| version(&entry.file_name().to_string_lossy())).max();
+    // ponytail: a browser found without its version folders (on PATH elsewhere) is called Chrome 138.
+    let major = newest.map_or(138, |v| v[0]);
+    let edge = exe.file_stem().is_some_and(|stem| stem.eq_ignore_ascii_case("msedge"));
+    format!("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{major}.0.0.0 Safari/537.36{}", if edge { format!(" Edg/{major}.0.0.0") } else { String::new() })
+}
 
 /// Does not open a console window when the browser is started from a GUI process.
 fn quiet(cmd: &mut Command) -> &mut Command {
@@ -138,7 +150,7 @@ async fn start(exe: &Path, profile: &Path, throwaway: bool) -> Result<(Browser, 
 
     let mut cmd = Command::new(exe);
     cmd.args(["--headless=new", "--remote-debugging-port=0", "--no-first-run", "--no-default-browser-check", "--disable-gpu", "--window-size=1280,800", "--autoplay-policy=no-user-gesture-required"])
-        .arg(format!("--user-agent={USER_AGENT}"))
+        .arg(format!("--user-agent={}", user_agent(exe)))
         .arg(format!("--user-data-dir={}", profile.display()))
         .arg("about:blank")
         .stdin(Stdio::null())
@@ -174,8 +186,8 @@ async fn start(exe: &Path, profile: &Path, throwaway: bool) -> Result<(Browser, 
 }
 
 /// The browser as anyone uses it, on the Browser pane's profile: a window of its own with nothing driving it, and not
-/// tied to this process, so it is the user's to close. For signing in where a driven browser is turned away
-/// (`live::sign_in`).
+/// tied to this process, so it is the user's to close. For signing in, or passing a check for a person, where a driven
+/// browser is turned away (`live::in_window`).
 pub fn open_window(url: &str) -> Result<Child, String> {
     let exe = find_browser().ok_or_else(|| NOT_INSTALLED.to_string())?;
     let mut cmd = Command::new(exe);
@@ -225,6 +237,19 @@ fn tie_to_this_process(pid: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The headless browser names the version installed, as it would in a window, and Edge says it is Edge.
+    #[test]
+    fn the_headless_browser_names_the_version_installed() {
+        let dir = crate::tools::scratch("ua");
+        for folder in ["137.0.1.2", "138.0.7204.303", "SetupMetrics", "9.9"] {
+            std::fs::create_dir_all(dir.join(folder)).unwrap();
+        }
+        let agent = user_agent(&dir.join("thorium.exe"));
+        assert_eq!(agent, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36");
+        assert!(user_agent(&dir.join("msedge.exe")).ends_with("Safari/537.36 Edg/138.0.0.0"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn missing_program_is_not_on_path() {

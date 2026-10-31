@@ -260,7 +260,7 @@ fn page(app: &mut App, ui: &mut egui::Ui, view: Rect, round: f32, widest: f32, i
     let p = p();
     let root = app.conv.workspace();
     let key = live::key(&root);
-    let (title, driving, error, size, seq, running, viewport, pointer, url) = live::with(&root, |v| (v.title.clone(), v.driving > 0, v.error.clone(), v.size, v.seq, v.running, v.viewport, v.pointer.clone(), v.url.clone()));
+    let (title, driving, error, size, seq, running, viewport, pointer, url, check) = live::with(&root, |v| (v.title.clone(), v.driving > 0, v.error.clone(), v.size, v.seq, v.running, v.viewport, v.pointer.clone(), v.url.clone(), v.check));
     if (key.as_str(), seq) != (app.browser.shown.0.as_str(), app.browser.shown.1) {
         let rgba = live::with(&root, |v| v.rgba.clone());
         if size[0] > 0 && rgba.len() == size[0] * size[1] * 4 {
@@ -330,33 +330,41 @@ fn page(app: &mut App, ui: &mut egui::Ui, view: Rect, round: f32, widest: f32, i
         agent_pointer(ui, view, image, viewport, &pointer, driving);
     }
     error_strip(ui, view, error.as_deref());
-    if signin_note(ui, view, &url) {
-        app.rt.spawn(live::sign_in(root.clone(), url.clone()));
+    if window_note(ui, view, &url, &title, check) {
+        app.rt.spawn(live::in_window(root.clone(), url.clone()));
     }
     if driving && in_pane {
         badge(ui, view, &title);
     }
 }
 
-/// Google turns away a sign-in from a browser that is headless or driven by a program ("This browser or app may not be
-/// secure"), and this one is both: the agent drives it. It is not dressed up as an ordinary browser to get past that,
-/// which would also hide what the agent's browser is from every other site. On Google's sign-in pages the pane says so
-/// and offers to sign in in an ordinary window of the same browser on the same profile (`live::sign_in`). The user's
-/// own browser, offered before, signed them in there and not here. Returns whether that was asked for.
-fn signin_note(ui: &mut egui::Ui, view: Rect, url: &str) -> bool {
+/// Some pages turn away a browser that is headless or driven by a program, and this one is both: the agent drives it.
+/// Google's sign-in ("This browser or app may not be secure"), and the checks for a person in front of a site
+/// (Cloudflare's "Just a moment…"), which took a click here, thought, and asked again, round and round. The browser is
+/// not dressed up as an ordinary one to get past them, which would also hide what the agent's browser is from every
+/// other site. The pane says so and offers the page in an ordinary window of the same browser on the same profile
+/// (`live::in_window`), where the user signs in or passes the check, and that holds here too once the window is
+/// closed. The user's own browser, offered before for signing in, signed them in there and not here. Returns whether
+/// the window was asked for.
+fn window_note(ui: &mut egui::Ui, view: Rect, url: &str, title: &str, check: bool) -> bool {
     let host = url.split("://").nth(1).and_then(|rest| rest.split(['/', '?', '#']).next()).unwrap_or("");
-    if host != "accounts.google.com" {
+    // A check a person can pass; a site's outright "access denied" is not one.
+    let check = check || crate::browser::page::detect_challenge(title, "").or(url.contains("__cf_chl").then_some("Cloudflare")).is_some_and(|who| who != "an edge block");
+    let (head, body, label) = if host == "accounts.google.com" {
+        ("Google won't sign you in here", "It turns away browsers that a program drives, like this one.\nSign in in a window of its own: close it when you're done, and the pane is signed in too.", "Open a sign-in window")
+    } else if check {
+        ("This site wants to see a person", "Its check turns away browsers that a program drives, like this one.\nPass it in its own window, then close it: the page comes back here.", "Open in a window")
+    } else {
         return false;
-    }
+    };
     let p = p();
     let inner = view.shrink(12.0);
     // Stretched over the window, a card the page's width would leave the button far from the words.
     let width = inner.width().min(620.0);
-    let label = "Open a sign-in window";
     let button_w = widgets::galley(ui, label, theme::font(12.0, W::Medium), p.text).size().x + 20.0;
     let text_w = (width - 28.0 - button_w - 14.0).max(120.0);
-    let head = ui.painter().layout("Google won't sign you in here".into(), theme::font(12.5, W::Semibold), p.text, text_w);
-    let body = ui.painter().layout("It turns away browsers that a program drives, like this one.\nSign in in a window of its own: close it when you're done, and the pane is signed in too.".into(), theme::font(11.5, W::Regular), p.text2, text_w);
+    let head = ui.painter().layout(head.into(), theme::font(12.5, W::Semibold), p.text, text_w);
+    let body = ui.painter().layout(body.into(), theme::font(11.5, W::Regular), p.text2, text_w);
     let height = 14.0 + head.size().y + 3.0 + body.size().y + 14.0;
     let card = Rect::from_min_size(pos2(inner.center().x - width / 2.0, inner.bottom() - height), vec2(width, height));
     let painter = ui.painter().with_clip_rect(view);
@@ -498,12 +506,12 @@ fn empty(ui: &mut egui::Ui, view: Rect, running: bool) {
     let p = p();
     let c = view.center();
     icons::paint(ui, icons::GLOBE, pos2(c.x, c.y - 30.0), 26.0, p.muted);
-    let signing = live::signing_in();
-    let first = widgets::galley(ui, if signing { "Signing in…" } else if running { "Opening…" } else { "Nothing open yet" }, theme::font(14.0, W::Medium), p.text2);
+    let away = live::in_window_now();
+    let first = widgets::galley(ui, if away { "Open in a window" } else if running { "Opening…" } else { "Nothing open yet" }, theme::font(14.0, W::Medium), p.text2);
     widgets::text_at(ui, c.x - first.size().x / 2.0, c.y + 4.0, first);
     // Wrapped and centred: on one line it ran past a pane at its narrowest.
     let room = Rect::from_center_size(pos2(c.x, c.y + 44.0), vec2((view.width() - 48.0).min(420.0), 40.0));
-    let hint = if signing { "Finish in the browser window that opened, then close it: the page comes back here, signed in." } else { "Type an address above, preview an .html file, or ask the agent to open a page." };
+    let hint = if away { "Finish in the browser window that opened, then close it: the page comes back here, with what you did there." } else { "Type an address above, preview an .html file, or ask the agent to open a page." };
     let hint = egui::RichText::new(hint).font(theme::font(12.0, W::Regular)).color(p.muted);
     ui.scope_builder(egui::UiBuilder::new().max_rect(room).layout(egui::Layout::top_down(egui::Align::Center)), |ui| ui.add(egui::Label::new(hint).wrap()));
 }

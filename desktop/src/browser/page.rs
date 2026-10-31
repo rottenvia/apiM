@@ -174,14 +174,26 @@ const SIGNATURES: [(&str, &str); 12] = [
     (r"incapsula incident id", "Imperva"),
 ];
 
+/// Does this request bring Cloudflare's check for a person: its widget (Turnstile, on a site's own page, whatever the
+/// page is called) or its whole-page check? Not the quiet script many of its sites load on every page (`/jsd/`), which
+/// asks nothing of anyone.
+pub fn asks_for_a_person(url: &str) -> bool {
+    url.starts_with("https://challenges.cloudflare.com/") || (url.contains("/cdn-cgi/challenge-platform/") && url.contains("/orchestrate/"))
+}
+
 /// Is this an anti-bot challenge rather than the page that was asked for? Returns who it is from.
 /// A long page that merely mentions a captcha is an article, so a short body is required for most signatures.
 pub fn detect_challenge(title: &str, text: &str) -> Option<&'static str> {
+    // Built once: the Browser pane asks about its page's title every frame it draws.
+    static COMPILED: std::sync::LazyLock<(Regex, Vec<(Regex, &'static str)>)> = std::sync::LazyLock::new(|| {
+        (Regex::new("just a moment|cf_chl_|incapsula incident").expect("valid pattern"), SIGNATURES.iter().map(|(pattern, who)| (Regex::new(pattern).expect("valid pattern"), *who)).collect())
+    });
+    let (always, signatures) = &*COMPILED;
     let t = format!("{title}\n{text}").to_lowercase();
     let short = text.trim().chars().count() < 2000;
-    let always = Regex::new("just a moment|cf_chl_|incapsula incident").expect("valid pattern").is_match(&t);
-    for (pattern, who) in SIGNATURES {
-        if !Regex::new(pattern).expect("valid pattern").is_match(&t) {
+    let always = always.is_match(&t);
+    for (pattern, who) in signatures {
+        if !pattern.is_match(&t) {
             continue;
         }
         if !short && !always {
@@ -270,6 +282,7 @@ pub fn format_session(s: &Session) -> String {
     let mut lines: Vec<String> = Vec::new();
     if let Some(who) = s.blocked {
         lines.push(format!("NOTE: this page is {who}'s anti-bot challenge, not the site's real content. The selectors and text below describe the challenge page, not the site."));
+        lines.push("It turns away browsers that a program drives, so clicking it here only brings it back. The user can pass it: the Browser pane offers to open the page in a window of its own, and once they have and closed it, the page loads here. If this page matters, ask them to; do not click the check or reload it over and over.".into());
         lines.push("The raw page data below is still available — proceed with the task however you judge best.".into());
         lines.push(String::new());
     }
@@ -762,6 +775,9 @@ async fn pump(mut events: mpsc::UnboundedReceiver<Value>, cdp: Cdp, sid: String,
                 }
                 let what = format!("{} {}", p["request"]["method"].as_str().unwrap_or("GET"), clip(p["request"]["url"].as_str().unwrap_or(""), 200));
                 l.requests.insert(p["requestId"].as_str().unwrap_or("").to_string(), what);
+                if asks_for_a_person(p["request"]["url"].as_str().unwrap_or("")) {
+                    crate::browser::live::checked(&sid);
+                }
             }
             "Network.loadingFailed" => {
                 let mut l = log.lock().unwrap();
@@ -860,6 +876,14 @@ mod tests {
                 None => assert!(got.is_ok(), "{} should validate: {got:?}", case[0]),
             }
         }
+    }
+
+    #[test]
+    fn cloudflares_check_is_told_from_its_quiet_script() {
+        assert!(asks_for_a_person("https://challenges.cloudflare.com/turnstile/v0/api.js?onload=x"));
+        assert!(asks_for_a_person("https://steamdb.info/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1?ray=8f"));
+        assert!(!asks_for_a_person("https://fbref.com/cdn-cgi/challenge-platform/scripts/jsd/main.js"));
+        assert!(!asks_for_a_person("https://example.com/challenges.cloudflare.com/"));
     }
 
     #[test]
